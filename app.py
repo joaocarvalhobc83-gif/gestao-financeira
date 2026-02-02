@@ -124,10 +124,13 @@ def load_hist_extrato():
     return pd.DataFrame(columns=["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"])
 
 def save_hist_extrato(df):
+    # Salva apenas o que está marcado como conciliado para o arquivo histórico
     conc = df[df["CONCILIADO"] == True][["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]]
     hist = load_hist_extrato()
     new_ids = set(conc["ID_HASH"])
+    # Remove antigos se existirem para atualizar
     hist = hist[~hist["ID_HASH"].isin(new_ids)]
+    # Salva
     pd.concat([hist, conc], ignore_index=True).to_csv(DB_EXTRATO_HIST, index=False)
 
 def process_extrato(file):
@@ -156,15 +159,32 @@ def process_extrato(file):
         df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         
-        hist = load_hist_extrato()
-        if not hist.empty:
-            df = df.merge(hist, on="ID_HASH", how="left")
-            df["CONCILIADO"] = df["CONCILIADO"].apply(lambda x: True if str(x).lower() == 'true' else False)
-        else:
-            df["CONCILIADO"] = False
-            df["DATA_CONCILIACAO"] = None
+        # Inicializa colunas
+        df["CONCILIADO"] = False
+        df["DATA_CONCILIACAO"] = None
+        
         return df
     except: return None
+
+# --- SINCRONIZAÇÃO DE MEMÓRIA (O FIX DO PROBLEMA) ---
+def sync_extrato_com_historico():
+    """Força a atualização do Extrato em memória com o arquivo CSV."""
+    if st.session_state.dados_mestre is not None:
+        hist = load_hist_extrato()
+        if not hist.empty:
+            # Converte para dict para lookup rápido
+            hist_dict = hist.set_index('ID_HASH')[['CONCILIADO', 'DATA_CONCILIACAO']].to_dict('index')
+            
+            # Atualiza o dataframe mestre linha a linha (mais seguro) ou via map
+            def atualizar_row(row):
+                if row['ID_HASH'] in hist_dict:
+                    return True, hist_dict[row['ID_HASH']]['DATA_CONCILIACAO']
+                return row['CONCILIADO'], row['DATA_CONCILIACAO']
+
+            # Aplica atualização
+            st.session_state.dados_mestre[['CONCILIADO', 'DATA_CONCILIACAO']] = st.session_state.dados_mestre.apply(
+                lambda row: pd.Series(atualizar_row(row)), axis=1
+            )
 
 # --- BENNER ---
 def load_db_benner():
@@ -211,6 +231,9 @@ if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
 if "conflitos" not in st.session_state: st.session_state.conflitos = None
 if "novos" not in st.session_state: st.session_state.novos = None
 
+# SINCRONIZAÇÃO AUTOMÁTICA AO INICIAR/RODAR
+sync_extrato_com_historico()
+
 # States da Busca Extrato
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
@@ -234,6 +257,7 @@ f_ben = st.sidebar.file_uploader("2. Documentos Benner (CSV/Excel)", type=["csv"
 
 if f_ext and st.session_state.dados_mestre is None:
     st.session_state.dados_mestre = process_extrato(f_ext)
+    sync_extrato_com_historico() # Garante sync logo após carregar
     st.toast("Extrato Carregado!", icon="✅")
 
 if f_ben:
@@ -264,6 +288,7 @@ if f_ben:
                 st.toast("⚠️ Conflitos detectados!", icon="⚠️")
                 
             st.session_state.last_benner = f_ben.name
+            st.rerun() # Rerun para mostrar conflitos
         except Exception as e:
             st.error(f"Erro: {e}")
 
@@ -414,28 +439,33 @@ elif pagina == "🔎 Busca Extrato":
                 column_config={"CONCILIADO": st.column_config.CheckboxColumn(default=False), "ID_HASH": None}
             )
             
+            # Lógica de Salvamento Robusta
             ids_conc = edited[edited["CONCILIADO"]==True]["ID_HASH"].tolist()
+            ids_unconc = edited[edited["CONCILIADO"]==False]["ID_HASH"].tolist()
+            
+            # Detecta mudanças
+            changed = False
+            
+            # Marcados
             if ids_conc:
                 mask = st.session_state.dados_mestre["ID_HASH"].isin(ids_conc)
-                # Verifica se houve mudança para salvar
-                changed = False
-                for i_hash in ids_conc:
-                    if not st.session_state.dados_mestre.loc[st.session_state.dados_mestre["ID_HASH"]==i_hash, "CONCILIADO"].values[0]:
-                        changed = True
-                
-                # Desconciliação
-                ids_unconc = edited[edited["CONCILIADO"]==False]["ID_HASH"].tolist()
-                mask_un = st.session_state.dados_mestre["ID_HASH"].isin(ids_unconc) & st.session_state.dados_mestre["ID_HASH"].isin(df_f["ID_HASH"])
-                if st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"].any():
-                     changed = True
-
-                if changed:
+                # Se houver algum False que virou True
+                if not st.session_state.dados_mestre.loc[mask, "CONCILIADO"].all():
                     st.session_state.dados_mestre.loc[mask, "CONCILIADO"] = True
                     st.session_state.dados_mestre.loc[mask, "DATA_CONCILIACAO"] = datetime.now().strftime("%d/%m/%Y %H:%M")
-                    st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"] = False
-                    st.session_state.dados_mestre.loc[mask_un, "DATA_CONCILIACAO"] = None
-                    save_hist_extrato(st.session_state.dados_mestre)
-                    st.toast("Alterações Salvas!")
+                    changed = True
+            
+            # Desmarcados (Apenas os que estão visíveis no filtro atual)
+            # Precisamos garantir que não desmarcamos coisas que não estão na tela
+            mask_un = st.session_state.dados_mestre["ID_HASH"].isin(ids_unconc) & st.session_state.dados_mestre["ID_HASH"].isin(df_f["ID_HASH"])
+            if st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"].any():
+                st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"] = False
+                st.session_state.dados_mestre.loc[mask_un, "DATA_CONCILIACAO"] = None
+                changed = True
+
+            if changed:
+                save_hist_extrato(st.session_state.dados_mestre)
+                st.toast("Alterações Salvas Automaticamente!")
             
             # EXPORTAÇÃO EXCEL
             st.download_button("📥 BAIXAR EXTRATO (XLSX)", to_excel(df_f), "extrato_filtrado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
