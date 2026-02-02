@@ -5,27 +5,32 @@ import os
 import hashlib
 from datetime import datetime, date, timedelta
 from io import BytesIO
-from rapidfuzz import process, fuzz
+from rapidfuzz import fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO ---
+# --- 1. CONFIGURAÇÃO E LOGIN ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
-    .stApp { background-color: #0f172a; font-family: 'Inter', sans-serif; }
-    div[data-testid="stMetric"] { background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; }
-    .stTextInput > div > div > input, .stSelectbox > div > div > div, .stDateInput > div > div > input { background-color: #1e293b; color: white; border-radius: 10px; border: 1px solid #334155; }
-    div.stDownloadButton > button, div.stButton > button { background: linear-gradient(90deg, #10b981 0%, #059669 100%); color: white; border: none; border-radius: 8px; font-weight: 700; width: 100%; text-transform: uppercase; }
-    .conflict-box { background-color: #451a03; border: 1px solid #f59e0b; padding: 20px; border-radius: 10px; margin-bottom: 20px; color: #fbbf24; }
-</style>
-""", unsafe_allow_html=True)
+def check_password():
+    if st.session_state.get("password_correct", False): return True
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<h1 style='text-align: center;'>🔐 Acesso Restrito</h1>", unsafe_allow_html=True)
+        user = st.text_input("Usuário")
+        pwd = st.text_input("Senha", type="password")
+        if st.button("ENTRAR"):
+            if user == "admin" and pwd == "admin":
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else: st.error("Usuário ou senha incorretos.")
+    return False
 
-# --- 2. BANCO DE DADOS (ARQUIVOS FIXOS) ---
+if not check_password(): st.stop()
+
+# --- 2. CAMINHOS DE BANCO DE DATA (PERSISTÊNCIA) ---
 DB_EXTRATO = "database_extrato_master.csv"
 DB_BENNER = "db_benner_master.csv"
 
-# --- 3. FUNÇÕES DE TRATAMENTO ---
+# --- 3. FUNÇÕES UTILITÁRIAS ---
 def converter_valor(valor):
     if pd.isna(valor) or valor == "": return 0.0
     v = str(valor).strip().upper().replace('R$', '').replace(' ', '')
@@ -41,53 +46,31 @@ def gerar_hash(row):
     texto = f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}"
     return hashlib.md5(texto.encode()).hexdigest()
 
-# --- 4. CARREGAMENTO E PERSISTÊNCIA ---
+# --- 4. CARREGAMENTO DOS BANCOS ---
 def load_extrato():
     if os.path.exists(DB_EXTRATO):
         df = pd.read_csv(DB_EXTRATO)
         df['DATA'] = pd.to_datetime(df['DATA'])
-        df['CONCILIADO'] = df['CONCILIADO'].astype(bool)
         return df
     return None
-
-def save_extrato(df):
-    df.to_csv(DB_EXTRATO, index=False)
-    st.session_state.dados_mestre = df
 
 def load_benner():
     if os.path.exists(DB_BENNER):
         df = pd.read_csv(DB_BENNER)
-        df['Data Baixa'] = pd.to_datetime(df['Data Baixa'])
-        df['Data de Vencimento'] = pd.to_datetime(df['Data de Vencimento'])
+        df['Data Baixa'] = pd.to_datetime(df['Data Baixa'], errors='coerce')
+        df['Data de Vencimento'] = pd.to_datetime(df['Data de Vencimento'], errors='coerce')
         return df
     return pd.DataFrame()
 
-# --- 5. LOGIN ---
-if "auth" not in st.session_state: st.session_state.auth = False
-if not st.session_state.auth:
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        st.title("🔐 Login")
-        u = st.text_input("Usuário")
-        p = st.text_input("Senha", type="password")
-        if st.button("Acessar"):
-            if u == "admin" and p == "admin": 
-                st.session_state.auth = True
-                st.rerun()
-    st.stop()
-
-# --- INICIALIZAÇÃO DE DADOS ---
+# Inicializa Estados
 if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = load_extrato()
 if "db_benner" not in st.session_state: st.session_state.db_benner = load_benner()
 
-# --- SIDEBAR ---
-st.sidebar.title("Navegação")
-aba = st.sidebar.radio("Ir para:", ["📁 Gestão Benner", "🔎 Busca Extrato", "🤝 Conciliação Automática"])
+# --- 5. PROCESSAMENTO DE UPLOAD ---
+st.sidebar.title("🚀 Importação")
+up_ext = st.sidebar.file_uploader("Subir Extrato (Excel)", type=["xlsx"])
+up_ben = st.sidebar.file_uploader("Subir Benner (Excel/CSV)", type=["xlsx", "csv"])
 
-up_ext = st.sidebar.file_uploader("Importar Extrato (Soma ao Banco)", type=["xlsx"])
-up_ben = st.sidebar.file_uploader("Importar Benner", type=["xlsx", "csv"])
-
-# Processar Novo Extrato (Incremental)
 if up_ext:
     df_new = pd.read_excel(up_ext)
     df_new.columns = [str(c).upper().strip() for c in df_new.columns]
@@ -97,95 +80,132 @@ if up_ext:
     df_new['VALOR'] = df_new['VALOR'].apply(converter_valor)
     df_new['OCORRENCIA'] = df_new.groupby(['DATA', 'VALOR', 'DESCRIÇÃO']).cumcount()
     df_new['ID_HASH'] = df_new.apply(gerar_hash, axis=1)
-    df_new['CONCILIADO'] = False
-    df_new['DATA_CONCILIACAO'] = ""
-    df_new['MES_ANO'] = df_new['DATA'].dt.strftime('%m/%Y')
     
+    # Se já existir banco, mescla sem duplicar
     if st.session_state.dados_mestre is not None:
-        df_final = pd.concat([st.session_state.dados_mestre, df_new]).drop_duplicates(subset='ID_HASH', keep='first')
-    else: df_final = df_new
-    save_extrato(df_final)
-    st.sidebar.success("Extrato atualizado no banco!")
+        df_base = st.session_state.dados_mestre
+        df_new = df_new[~df_new['ID_HASH'].isin(df_base['ID_HASH'])]
+        df_new['CONCILIADO'] = False
+        df_new['DATA_CONCILIACAO'] = ""
+        df_final = pd.concat([df_base, df_new], ignore_index=True)
+    else:
+        df_new['CONCILIADO'] = False
+        df_new['DATA_CONCILIACAO'] = ""
+        df_final = df_new
+
+    df_final.to_csv(DB_EXTRATO, index=False)
+    st.session_state.dados_mestre = df_final
+    st.sidebar.success("Extrato Armazenado!")
+
+if up_ben:
+    try:
+        if up_ben.name.endswith('.csv'): df_up = pd.read_csv(up_ben)
+        else: df_up = pd.read_excel(up_ben)
+        
+        df_up.columns = [str(c).strip() for c in df_up.columns]
+        mapa_b = {'Número': 'Número', 'Nome': 'Nome', 'Data Baixa': 'Data Baixa', 'Valor Total': 'Valor Total', 'Tipo do Documento': 'Tipo do Documento'}
+        df_up = df_up.rename(columns={k:v for k,v in mapa_b.items() if k in df_up.columns})
+        
+        # Identifica Banco
+        if 'Tipo do Documento' in df_up.columns:
+            df_up['Tipo do Documento'] = df_up['Tipo do Documento'].apply(lambda x: 'BASA' if 'AMAZONAS' in str(x).upper() else ('BB' if 'BRASIL' in str(x).upper() else x))
+        
+        df_up['Valor Total'] = df_up['Valor Total'].apply(converter_valor)
+        df_up['ID_BENNER'] = df_up['Número'].astype(str)
+        df_up['Data Baixa'] = pd.to_datetime(df_up['Data Baixa'], errors='coerce')
+        
+        # Salva Benner
+        df_up.to_csv(DB_BENNER, index=False)
+        st.session_state.db_benner = df_up
+        
+        # --- AUTO-CONCILIAÇÃO AUTOMÁTICA ---
+        if st.session_state.dados_mestre is not None:
+            df_ex = st.session_state.dados_mestre
+            baixados = df_up[df_up['Data Baixa'].notna()]
+            count = 0
+            for _, doc in baixados.iterrows():
+                mask = (df_ex['CONCILIADO'] == False) & (abs(df_ex['VALOR'].abs() - doc['Valor Total']) <= 0.05)
+                idx = df_ex[mask].index
+                if not idx.empty:
+                    df_ex.loc[idx[0], 'CONCILIADO'] = True
+                    df_ex.loc[idx[0], 'DATA_CONCILIACAO'] = doc['Data Baixa'].strftime("%Y-%m-%d")
+                    count += 1
+            df_ex.to_csv(DB_EXTRATO, index=False)
+            st.session_state.dados_mestre = df_ex
+            st.sidebar.success(f"Benner importado e {count} itens conciliados!")
+    except Exception as e: st.sidebar.error(f"Erro no Benner: {e}")
+
+# --- 6. NAVEGAÇÃO ---
+pagina = st.sidebar.radio("Ir para:", ["📁 Gestão Benner", "🔎 Busca Extrato", "🤝 Conciliação"])
 
 # --- ABA 1: GESTÃO BENNER ---
-if aba == "📁 Gestão Benner":
+if pagina == "📁 Gestão Benner":
     st.title("📁 Gestão Benner")
-    df_b = st.session_state.db_benner
-    if not df_b.empty:
+    df = st.session_state.db_benner
+    if not df.empty:
         with st.expander("🌪️ Filtros de Exportação", expanded=True):
-            col1, col2 = st.columns(2)
-            d_ini = col1.date_input("Baixa De", date.today() - timedelta(days=7))
-            d_fim = col2.date_input("Baixa Até", date.today())
-            banco_filt = st.selectbox("Banco", ["Todos", "BB", "BASA"])
+            c1, c2, c3 = st.columns(3)
+            d_ini = c1.date_input("Baixa De", date.today() - timedelta(days=30))
+            d_fim = c2.date_input("Baixa Até", date.today())
+            banco = c3.selectbox("Banco", ["Todos", "BB", "BASA"])
             
-            df_filt_b = df_b.copy()
-            df_filt_b['Data Baixa'] = pd.to_datetime(df_filt_b['Data Baixa'])
-            df_filt_b = df_filt_b[(df_filt_b['Data Baixa'].dt.date >= d_ini) & (df_filt_b['Data Baixa'].dt.date <= d_fim)]
+            df_f = df.copy()
+            df_f = df_f[(df_f['Data Baixa'].dt.date >= d_ini) & (df_f['Data Baixa'].dt.date <= d_fim)]
+            if banco != "Todos": df_f = df_f[df_f['Tipo do Documento'] == banco]
             
-            if banco_filt != "Todos":
-                df_filt_b = df_filt_b[df_filt_b['Tipo do Documento'].str.contains(banco_filt, na=False)]
+        st.metric("Total Filtrado", formatar_br(df_f['Valor Total'].sum()))
+        st.dataframe(df_f, use_container_width=True, hide_index=True)
         
-        st.metric("Total Filtrado", formatar_br(df_filt_b['Valor Total'].sum()))
-        st.dataframe(df_filt_b, use_container_width=True, hide_index=True)
-        
-        excel_b = BytesIO()
-        with pd.ExcelWriter(excel_b, engine='openpyxl') as writer:
-            df_filt_b.to_excel(writer, index=False)
-        st.download_button("📥 Exportar Seleção (XLSX)", excel_b.getvalue(), "export_benner.xlsx")
+        # Exportação XLSX
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_f.to_excel(writer, index=False)
+        st.download_button("📥 Exportar Seleção (XLSX)", output.getvalue(), "relatorio_benner.xlsx")
 
 # --- ABA 2: BUSCA EXTRATO ---
-elif aba == "🔎 Busca Extrato":
-    st.title("🔎 Busca Extrato (Banco de Dados Fixo)")
+elif pagina == "🔎 Busca Extrato":
+    st.title("🔎 Busca Extrato (Banco de Dados Armazenado)")
     if st.session_state.dados_mestre is not None:
         df = st.session_state.dados_mestre.copy()
         
         # Filtros
-        with st.expander("🌪️ Filtros de Pesquisa", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            f_mes = c1.selectbox("Mês", ["Todos"] + sorted(df['MES_ANO'].unique().tolist()))
-            f_status = c2.selectbox("Status", ["Todos", "Conciliado", "Pendente"])
-            f_data_c = c3.date_input("Data da Conciliação", value=None)
-        
-        df_f = df.copy()
-        if f_mes != "Todos": df_f = df_f[df_f['MES_ANO'] == f_mes]
-        if f_status == "Conciliado": df_f = df_f[df_f['CONCILIADO'] == True]
-        if f_status == "Pendente": df_f = df_f[df_f['CONCILIADO'] == False]
-        if f_data_c: 
-            df_f = df_f[pd.to_datetime(df_f['DATA_CONCILIACAO']).dt.date == f_data_c]
+        with st.expander("🌪️ Filtros Avançados", expanded=True):
+            f1, f2, f3 = st.columns(3)
+            sel_mes = f1.selectbox("Mês", ["Todos"] + sorted(df['MES_ANO'].unique().tolist()))
+            sel_status = f2.selectbox("Status", ["Todos", "Conciliado", "Pendente"])
+            sel_data_c = f3.date_input("Data da Conciliação", value=None)
 
-        # Métricas Reais
+        df_view = df.copy()
+        if sel_mes != "Todos": df_view = df_view[df_view['MES_ANO'] == sel_mes]
+        if sel_status == "Conciliado": df_view = df_view[df_view['CONCILIADO'] == True]
+        if sel_status == "Pendente": df_view = df_view[df_view['CONCILIADO'] == False]
+        if sel_data_c: df_view = df_view[df_view['DATA_CONCILIACAO'] == str(sel_data_c)]
+
+        # Métricas
+        val_total_conc = df[df['CONCILIADO'] == True]['VALOR'].sum()
         hoje_str = date.today().strftime("%Y-%m-%d")
-        total_conc = df[df['CONCILIADO'] == True]['VALOR'].sum()
-        conc_hoje = df[df['DATA_CONCILIACAO'] == hoje_str]['VALOR'].sum()
+        val_hoje = df[df['DATA_CONCILIACAO'] == hoje_str]['VALOR'].sum()
         
         m1, m2 = st.columns(2)
-        m1.metric("Total Conciliado (Banco)", formatar_br(total_conc))
-        m2.metric("Conciliados Hoje", formatar_br(conc_hoje))
-        
+        m1.metric("Total Acumulado Conciliado", formatar_br(val_total_conc))
+        m2.metric("Conciliados Hoje", formatar_br(val_hoje))
+
         st.markdown("---")
         edited = st.data_editor(
-            df_f[['CONCILIADO', 'DATA', 'BANCO', 'DESCRIÇÃO', 'VALOR', 'DATA_CONCILIACAO', 'ID_HASH']],
+            df_view[['CONCILIADO', 'DATA', 'BANCO', 'DESCRIÇÃO', 'VALOR', 'DATA_CONCILIACAO', 'ID_HASH']],
             hide_index=True, use_container_width=True,
             column_config={"CONCILIADO": st.column_config.CheckboxColumn(), "ID_HASH": None}
         )
-        
-        if st.button("💾 Salvar Alterações Manuais"):
-            for index, row in edited.iterrows():
-                idx_orig = df.index[df['ID_HASH'] == row['ID_HASH']].tolist()[0]
-                if row['CONCILIADO'] and not df.at[idx_orig, 'CONCILIADO']:
-                    df.at[idx_orig, 'CONCILIADO'] = True
-                    df.at[idx_orig, 'DATA_CONCILIACAO'] = hoje_str
-                elif not row['CONCILIADO']:
-                    df.at[idx_orig, 'CONCILIADO'] = False
-                    df.at[idx_orig, 'DATA_CONCILIACAO'] = ""
-            save_extrato(df)
-            st.success("Banco de dados atualizado!")
-            st.rerun()
 
-# --- ABA 3: CONCILIAÇÃO AUTOMÁTICA ---
-elif aba == "🤝 Conciliação Automática":
-    st.title("🤝 Conciliação Automática")
-    # Lógica de cruzamento Benner -> Extrato e marcação automática
-    if st.button("🚀 Iniciar Cruzamento Inteligente"):
-        # (Lógica de cruzamento conforme regras anteriores, salvando em save_extrato)
-        st.success("Cruzamento finalizado e salvo no banco!")
+        if st.button("💾 Salvar Alterações"):
+            for _, row in edited.iterrows():
+                idx = df.index[df['ID_HASH'] == row['ID_HASH']].tolist()[0]
+                if row['CONCILIADO'] and not df.at[idx, 'CONCILIADO']:
+                    df.at[idx, 'CONCILIADO'] = True
+                    df.at[idx, 'DATA_CONCILIACAO'] = date.today().strftime("%Y-%m-%d")
+                elif not row['CONCILIADO']:
+                    df.at[idx, 'CONCILIADO'] = False
+                    df.at[idx, 'DATA_CONCILIACAO'] = ""
+            df.to_csv(DB_EXTRATO, index=False)
+            st.session_state.dados_mestre = df
+            st.rerun()
