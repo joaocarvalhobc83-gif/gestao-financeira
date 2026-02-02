@@ -261,7 +261,7 @@ if pagina == "🔎 Busca Avançada":
             k4.metric("Saldo Seleção", formatar_br(ent + sai))
             
             st.markdown("---")
-            st.subheader("📋 Detalhamento (Edite a coluna 'Conciliado')")
+            st.subheader("📋 Detalhamento (Marque a coluna 'Conciliado')")
             
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_UNICO"]
             df_show = df_f[cols_order].copy()
@@ -441,3 +441,4 @@ elif pagina == "🤝 Conciliação Automática":
 
     else:
         st.info("Carregue Extrato e Documentos na barra lateral.")
+
