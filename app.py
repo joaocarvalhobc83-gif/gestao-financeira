@@ -48,7 +48,7 @@ st.markdown("""
         border: none;
         border-radius: 10px;
         font-weight: 600;
-        width: 100%; /* Botão ocupar largura total */
+        width: 100%;
     }
     [data-testid="stDataFrame"] {
         background-color: rgba(30, 41, 59, 0.3);
@@ -155,7 +155,7 @@ def processar_documentos(file):
         return df
     except: return None
 
-# --- 3. INICIALIZAÇÃO DE ESTADO (ISSO SEGURA OS FILTROS) ---
+# --- 3. INICIALIZAÇÃO DE ESTADO (ISSO GARANTE QUE NÃO LIMPA SOZINHO) ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
@@ -180,7 +180,7 @@ if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA (COM BOTÃO LIMPAR E ESTADO FIXO)
+# TELA 1: BUSCA AVANÇADA (COM ESTADO FIXO)
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     
@@ -189,21 +189,21 @@ if pagina == "🔎 Busca Avançada":
     
     if df_extrato is not None:
         
-        # --- ÁREA DOS FILTROS ---
+        # --- FILTROS ---
         with st.container():
-            # Botão de Limpar (Só funciona se clicar)
+            # Botão de Limpar (Só limpa se você clicar aqui)
             col_reset, _ = st.columns([1, 4])
             if col_reset.button("🧹 LIMPAR TODOS OS FILTROS"):
                 st.session_state.filtro_mes = "Todos"
                 st.session_state.filtro_banco = "Todos"
                 st.session_state.filtro_tipo = "Todos"
                 st.session_state.filtro_texto = ""
-                st.rerun() # Recarrega a página para aplicar a limpeza
+                st.rerun()
 
             c1, c2, c3 = st.columns(3)
             
+            # FILTROS PERSISTENTES (Ligados ao Session State)
             meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
-            # key="filtro_mes" liga esse campo à memória do sistema
             sel_mes = c1.selectbox("📅 Mês de Referência:", meses, key="filtro_mes")
             
             bancos = ["Todos"] + sorted(df_extrato["BANCO"].unique().tolist())
@@ -212,7 +212,7 @@ if pagina == "🔎 Busca Avançada":
             tipos = ["Todos", "CRÉDITO", "DÉBITO"]
             sel_tipo = c3.selectbox("🔄 Tipo de Movimento:", tipos, key="filtro_tipo")
         
-        # Aplicação dos Filtros (Usa o Session State para garantir persistência)
+        # Aplica Filtros
         df_f = df_extrato.copy()
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
         if st.session_state.filtro_banco != "Todos": df_f = df_f[df_f["BANCO"] == st.session_state.filtro_banco]
@@ -220,30 +220,26 @@ if pagina == "🔎 Busca Avançada":
 
         st.markdown("###")
         
-        # --- BUSCA DE TEXTO ---
+        # --- BUSCA DE TEXTO PERSISTENTE ---
         busca = st.text_input("🔎 Pesquisa Rápida (Valor ou Nome)", key="filtro_texto", placeholder="Ex: 1000 ou Nome...")
 
         if busca:
             termo = busca.strip()
-            # Visual (1000.)
             if termo.endswith('.'):
                 if termo[:-1].replace('.', '').isdigit():
                     df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
-                    st.toast(f"👁️ Filtro: {termo}", icon="✅")
                 else:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-            # Numérico (±0.10)
             elif any(char.isdigit() for char in termo):
                 try:
                     limpo = termo.replace('R$', '').replace(' ', '')
                     if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
+                    # Busca valor absoluto para pegar D e C
                     df_f = df_f[(df_f["VALOR"].abs() - valor_busca).abs() <= 0.10]
-                    st.toast(f"🎯 Valor: R$ {valor_busca:,.2f}", icon="✅")
                 except:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-            # Texto
             else:
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
 
@@ -260,8 +256,8 @@ if pagina == "🔎 Busca Avançada":
             k4.metric("Saldo Seleção", formatar_br(ent + sai))
             
             st.markdown("---")
-
             st.subheader("📋 Detalhamento")
+            
             df_show = df_f.copy()
             df_show["DATA"] = df_show["DATA"].dt.date
             
@@ -273,9 +269,7 @@ if pagina == "🔎 Busca Avançada":
                 column_config={
                     "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                     "BANCO": st.column_config.TextColumn("Instituição", width="medium"),
-                    "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large"),
-                    "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
-                    "TIPO": st.column_config.TextColumn("Tipo", width="small")
+                    "VALOR": st.column_config.NumberColumn("Valor", format="R$ %.2f")
                 }
             )
             
@@ -283,12 +277,7 @@ if pagina == "🔎 Busca Avançada":
             col_exp, _ = st.columns([1, 2])
             with col_exp:
                 dados_excel = to_excel(df_f)
-                st.download_button(
-                    label="📥 BAIXAR TABELA FILTRADA (EXCEL)",
-                    data=dados_excel,
-                    file_name="resultado_busca.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("📥 BAIXAR TABELA FILTRADA", dados_excel, "resultado_busca.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.warning("🔍 Nenhum dado encontrado.")
     else:
@@ -320,7 +309,6 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # Regra: Valor Absoluto para evitar erro de sinal
                 candidatos = [b for b in l_banco if b['ID_UNICO'] not in used_banco and abs(doc['VALOR_REF'] - abs(b['VALOR'])) <= 0.10]
                 if not candidatos: continue
                 
@@ -349,30 +337,25 @@ elif pagina == "🤝 Conciliação Automática":
             st.balloons()
             
             df_results = pd.DataFrame(matches)
-            
             if not df_results.empty:
-                st.success(f"✅ {len(df_results)} Pares Encontrados!")
+                st.success(f"✅ {len(df_results)} Conciliados!")
                 st.dataframe(df_results, use_container_width=True)
-                
-                col_exp_conc, _ = st.columns([1, 2])
-                with col_exp_conc:
-                    st.download_button("📥 BAIXAR CONCILIAÇÃO (EXCEL)", to_excel(df_results), "conciliacao.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("📥 BAIXAR CONCILIAÇÃO", to_excel(df_results), "conciliacao.xlsx")
             else:
                 st.warning("Nenhuma conciliação encontrada.")
             
             st.markdown("---")
             c1, c2 = st.columns(2)
-            
             sobra_b = df_extrato[~df_extrato['ID_UNICO'].isin(used_banco)].copy()
             sobra_b["Data"] = sobra_b["DATA"].apply(formatar_data)
             sobra_b["Valor"] = sobra_b["VALOR"].apply(formatar_br)
-            c1.error(f"Sobras Extrato ({len(sobra_b)})")
+            c1.error(f"Pendentes Extrato ({len(sobra_b)})")
             c1.dataframe(sobra_b[["Data", "BANCO", "DESCRIÇÃO", "Valor"]], use_container_width=True)
             
             sobra_d = df_docs[~df_docs['ID_UNICO'].isin(used_docs)].copy()
             sobra_d["Data"] = sobra_d["DATA_REF"].apply(formatar_data)
             sobra_d["Valor"] = sobra_d["VALOR_REF"].apply(formatar_br)
-            c2.error(f"Sobras Documentos ({len(sobra_d)})")
+            c2.error(f"Pendentes Documentos ({len(sobra_d)})")
             c2.dataframe(sobra_d[["Data", "DESC_REF", "Valor"]], use_container_width=True)
     else:
-        st.info("Carregue os arquivos na lateral.")
+        st.info("Carregue arquivos na lateral.")
