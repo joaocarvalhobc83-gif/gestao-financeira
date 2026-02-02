@@ -3,11 +3,11 @@ import pandas as pd
 import re
 import os
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, timedelta
 from io import BytesIO
 from rapidfuzz import process, fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO ---
+# --- 1. CONFIGURAÇÃO E ESTILO PREMIUM ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
 st.markdown("""
@@ -16,61 +16,154 @@ st.markdown("""
     
     .stApp { 
         background-color: #0f172a; 
+        background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); 
         font-family: 'Inter', sans-serif;
     }
 
     div[data-testid="stMetric"] {
         background: rgba(30, 41, 59, 0.4);
+        backdrop-filter: blur(12px);
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 16px;
         padding: 20px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
     }
     
-    .stTextInput > div > div > input, .stSelectbox > div > div > div, .stDateInput > div > div > input {
+    .stTextInput > div > div > input, .stSelectbox > div > div > div, .stRadio > div, .stDateInput > div > div > input {
         background-color: #1e293b;
         color: white;
         border-radius: 10px;
         border: 1px solid #334155;
     }
     
-    div.stDownloadButton > button, div.stButton > button {
+    div.stDownloadButton > button {
         background: linear-gradient(90deg, #10b981 0%, #059669 100%);
         color: white;
         border: none;
         border-radius: 8px;
+        padding: 0.8rem 1.5rem;
         font-weight: 700;
-        width: 100%;
         text-transform: uppercase;
+        width: 100%;
     }
     
-    /* Botão Secundário (Ignorar/Limpar) */
-    div.stButton > button[kind="secondary"] {
-        background-color: #64748b;
-        color: white;
-        background-image: none;
-        border: 1px solid #475569;
-    }
-
-    /* Botão Perigo (Zerar) */
+    /* Botão de Perigo (Zerar Base) */
     div.stButton > button[kind="primary"] {
         background-color: #ef4444;
-        background-image: none;
         border: 1px solid #b91c1c;
         color: white;
     }
 
-    .conflict-box {
-        background-color: #451a03;
-        border: 1px solid #f59e0b;
-        padding: 20px;
+    [data-testid="stDataFrame"] {
+        background-color: rgba(30, 41, 59, 0.3);
         border-radius: 10px;
-        margin-bottom: 20px;
-        color: #fbbf24;
+        padding: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. FUNÇÕES UTILITÁRIAS (RESTAURADAS) ---
+# --- 2. GESTÃO DE BANCO DE DADOS (ARQUIVOS LOCAIS) ---
+DB_EXTRATO_HIST = "historico_conciliacoes_db.csv"
+DB_BENNER = "db_benner_master.csv"
+
+# --- FUNÇÕES EXTRATO ---
+def carregar_historico_extrato():
+    if os.path.exists(DB_EXTRATO_HIST):
+        try: return pd.read_csv(DB_EXTRATO_HIST, dtype=str)
+        except: pass
+    return pd.DataFrame(columns=["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"])
+
+def salvar_historico_extrato(df_atual):
+    conciliados = df_atual[df_atual["CONCILIADO"] == True][["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]]
+    historico_antigo = carregar_historico_extrato()
+    ids_novos = set(conciliados["ID_HASH"])
+    historico_mantido = historico_antigo[~historico_antigo["ID_HASH"].isin(ids_novos)]
+    novo_db = pd.concat([historico_mantido, conciliados], ignore_index=True)
+    novo_db.to_csv(DB_EXTRATO_HIST, index=False)
+
+# --- FUNÇÕES BENNER ---
+def carregar_db_benner():
+    colunas_padrao = [
+        'Número', 'Identificador do pagamento', 'Nome', 'CNPJ/CPF', 
+        'Tipo do Documento', 'Data de Emissão', 'Data de Vencimento', 
+        'Data Baixa', 'Valor Baixa', 'Valor Total', 'Data de cancelamento',
+        'ID_BENNER', 'STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA'
+    ]
+    
+    if os.path.exists(DB_BENNER):
+        try:
+            df = pd.read_csv(DB_BENNER, dtype={'Número': str, 'CNPJ/CPF': str, 'ID_BENNER': str})
+            for col in colunas_padrao:
+                if col not in df.columns: df[col] = None
+            df = df.drop_duplicates(subset=['ID_BENNER'], keep='last')
+            return df
+        except:
+            return pd.DataFrame(columns=colunas_padrao)
+    return pd.DataFrame(columns=colunas_padrao)
+
+def zerar_base_benner():
+    if os.path.exists(DB_BENNER): os.remove(DB_BENNER)
+    st.session_state.db_benner = pd.DataFrame(columns=[
+        'Número', 'Identificador do pagamento', 'Nome', 'CNPJ/CPF', 
+        'Tipo do Documento', 'Data de Emissão', 'Data de Vencimento', 
+        'Data Baixa', 'Valor Baixa', 'Valor Total', 'Data de cancelamento',
+        'ID_BENNER', 'STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA'
+    ])
+    st.toast("Base de Dados Benner apagada!", icon="🗑️")
+
+def atualizar_db_benner(novo_df):
+    db_atual = carregar_db_benner()
+    novo_df['ID_BENNER'] = novo_df['Número'].astype(str).str.strip()
+    novo_df = novo_df.drop_duplicates(subset=['ID_BENNER'], keep='last')
+    
+    # Auto-Conciliação por Data Baixa
+    novo_df['Data Baixa Temp'] = pd.to_datetime(novo_df['Data Baixa'], errors='coerce')
+    novo_df['STATUS_CONCILIACAO'] = "Pendente"
+    novo_df['DATA_CONCILIACAO_SISTEMA'] = None
+    
+    mask_baixado = novo_df['Data Baixa Temp'].notna()
+    novo_df.loc[mask_baixado, 'STATUS_CONCILIACAO'] = 'Conciliado'
+    novo_df.loc[mask_baixado, 'DATA_CONCILIACAO_SISTEMA'] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    novo_df = novo_df.drop(columns=['Data Baixa Temp'])
+    
+    # Merge com preservação de status
+    ids_novos = set(novo_df['ID_BENNER'])
+    novos_registros = 0
+    
+    if not db_atual.empty:
+        ids_existentes = set(db_atual['ID_BENNER'])
+        novos_registros = len(ids_novos - ids_existentes)
+        status_map = db_atual.set_index('ID_BENNER')[['STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA']].to_dict('index')
+        
+        for idx, row in novo_df.iterrows():
+            id_b = row['ID_BENNER']
+            if row['STATUS_CONCILIACAO'] == 'Pendente' and id_b in status_map:
+                if status_map[id_b]['STATUS_CONCILIACAO'] == 'Conciliado':
+                    novo_df.at[idx, 'STATUS_CONCILIACAO'] = 'Conciliado'
+                    novo_df.at[idx, 'DATA_CONCILIACAO_SISTEMA'] = status_map[id_b]['DATA_CONCILIACAO_SISTEMA']
+
+    db_mantido = db_atual[~db_atual['ID_BENNER'].isin(ids_novos)]
+    db_final = pd.concat([db_mantido, novo_df], ignore_index=True)
+    db_final = db_final.drop_duplicates(subset=['ID_BENNER'], keep='last')
+    db_final.to_csv(DB_BENNER, index=False)
+    
+    return db_final, novos_registros, (len(novo_df) - novos_registros)
+
+def marcar_benner_como_conciliado(lista_ids_benner):
+    db = carregar_db_benner()
+    if db.empty: return
+    data_hoje = datetime.now().strftime("%d/%m/%Y %H:%M")
+    mask = db['ID_BENNER'].astype(str).isin([str(x) for x in lista_ids_benner])
+    db.loc[mask, 'STATUS_CONCILIACAO'] = 'Conciliado'
+    db.loc[mask, 'DATA_CONCILIACAO_SISTEMA'] = data_hoje
+    db.to_csv(DB_BENNER, index=False)
+    st.session_state.db_benner = db
+
+# --- 3. FUNÇÕES UTILITÁRIAS ---
+def gerar_hash_unico(row):
+    texto = f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}"
+    return hashlib.md5(texto.encode('utf-8')).hexdigest()
+
 def formatar_br(valor):
     try: return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return "R$ 0,00"
@@ -106,10 +199,6 @@ def converter_valor_correto(valor, linha_inteira=None):
         return val_float
     except: return 0.0
 
-def gerar_hash_unico(row):
-    texto = f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}"
-    return hashlib.md5(texto.encode('utf-8')).hexdigest()
-
 @st.cache_data(show_spinner=False)
 def to_excel(df_to_download):
     output = BytesIO()
@@ -117,25 +206,7 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 3. BANCO DE DADOS E PERSISTÊNCIA ---
-DB_EXTRATO_HIST = "historico_conciliacoes_db.csv"
-DB_BENNER = "db_benner_master.csv"
-
-# --- A. EXTRATO (Lógica Restaurada) ---
-def carregar_historico_extrato():
-    if os.path.exists(DB_EXTRATO_HIST):
-        try: return pd.read_csv(DB_EXTRATO_HIST, dtype=str)
-        except: pass
-    return pd.DataFrame(columns=["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"])
-
-def salvar_historico_extrato(df_atual):
-    conciliados = df_atual[df_atual["CONCILIADO"] == True][["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]]
-    historico_antigo = carregar_historico_extrato()
-    ids_novos = set(conciliados["ID_HASH"])
-    historico_mantido = historico_antigo[~historico_antigo["ID_HASH"].isin(ids_novos)]
-    novo_db = pd.concat([historico_mantido, conciliados], ignore_index=True)
-    novo_db.to_csv(DB_EXTRATO_HIST, index=False)
-
+# --- 4. PROCESSAMENTO ---
 def processar_extrato_inicial(file):
     try:
         xls = pd.ExcelFile(file, engine='openpyxl')
@@ -161,7 +232,6 @@ def processar_extrato_inicial(file):
         col_banco = next((c for c in df.columns if 'BANCO' in c), None)
         df["BANCO"] = df[col_banco].astype(str).str.upper() if col_banco else "PADRÃO"
         
-        # Gera Hash e Tratamentos
         df = df.sort_values(by=["DATA", "VALOR", "DESCRIÇÃO"])
         df['OCORRENCIA'] = df.groupby(['DATA', 'VALOR', 'DESCRIÇÃO', 'BANCO']).cumcount()
         df['ID_HASH'] = df.apply(gerar_hash_unico, axis=1)
@@ -171,7 +241,6 @@ def processar_extrato_inicial(file):
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         
-        # Merge Histórico
         historico = carregar_historico_extrato()
         if not historico.empty:
             df = df.merge(historico, on="ID_HASH", how="left")
@@ -181,230 +250,107 @@ def processar_extrato_inicial(file):
         else:
             df["CONCILIADO"] = False
             df["DATA_CONCILIACAO"] = None
-            
+        
         return df
     except Exception as e:
-        st.error(f"Erro ao processar extrato: {e}")
+        st.error(f"Erro: {e}")
         return None
 
-# --- B. BENNER (Lógica Nova Mantida) ---
-def carregar_db_benner():
-    cols = ['Número', 'Nome', 'CNPJ/CPF', 'Tipo do Documento', 'Data de Vencimento', 'Data Baixa', 'Valor Total', 'STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA', 'ID_BENNER']
-    if os.path.exists(DB_BENNER):
-        try:
-            df = pd.read_csv(DB_BENNER, dtype={'Número': str, 'ID_BENNER': str})
-            for c in cols:
-                if c not in df.columns: df[c] = None
-            return df
-        except: pass
-    return pd.DataFrame(columns=cols)
+def processar_upload_benner(file):
+    try:
+        try: df = pd.read_csv(file, sep=',') 
+        except: 
+            try: df = pd.read_csv(file, sep=';')
+            except: df = pd.read_excel(file)
+            
+        cols_map = {
+            'Número': 'Número', 'Numero': 'Número',
+            'Identificador do pagamento': 'Identificador do pagamento', 'ID Pagamento': 'Identificador do pagamento',
+            'Nome': 'Nome', 'Favorecido': 'Nome',
+            'CNPJ/CPF': 'CNPJ/CPF', 'CPF/CNPJ': 'CNPJ/CPF',
+            'Tipo do Documento': 'Tipo do Documento', 'Tipo': 'Tipo do Documento',
+            'Data de Emissão': 'Data de Emissão', 'Emissao': 'Data de Emissão',
+            'Data de Vencimento': 'Data de Vencimento', 'Vencimento': 'Data de Vencimento',
+            'Data Baixa': 'Data Baixa', 'Baixa': 'Data Baixa',
+            'Valor Baixa': 'Valor Baixa',
+            'Valor Total': 'Valor Total', 'Valor Liquido': 'Valor Total',
+            'Data de cancelamento': 'Data de cancelamento'
+        }
+        
+        cols_existentes = {k: v for k, v in cols_map.items() if k in df.columns}
+        df = df.rename(columns=cols_existentes)
+        
+        cols_finais = list(cols_map.values())
+        for col in list(set(cols_finais)):
+            if col not in df.columns: df[col] = None
+        df = df[list(set(cols_finais))]
+        
+        db_atualizado, qtd_novos, qtd_atualizados = atualizar_db_benner(df)
+        return db_atualizado, qtd_novos, qtd_atualizados
+        
+    except Exception as e:
+        st.error(f"Erro ao processar arquivo Benner: {e}")
+        return None, 0, 0
 
-def salvar_db_benner(df):
-    df.to_csv(DB_BENNER, index=False)
-    st.session_state.db_benner = df
-
-def zerar_base():
-    if os.path.exists(DB_BENNER): os.remove(DB_BENNER)
-    st.session_state.db_benner = pd.DataFrame(columns=['Número', 'Nome', 'CNPJ/CPF', 'Tipo do Documento', 'Data de Vencimento', 'Data Baixa', 'Valor Total', 'STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA', 'ID_BENNER'])
-    st.session_state.conflitos_pendentes = None
-    st.toast("Base Zerada!", icon="🗑️")
-
-def preparar_dados_upload(df_raw):
-    mapa = {
-        'Número': 'Número', 'Numero': 'Número',
-        'Nome': 'Nome', 'Favorecido': 'Nome',
-        'CNPJ/CPF': 'CNPJ/CPF',
-        'Tipo do Documento': 'Tipo do Documento', 'Tipo': 'Tipo do Documento',
-        'Data de Vencimento': 'Data de Vencimento', 'Vencimento': 'Data de Vencimento',
-        'Data Baixa': 'Data Baixa', 'Baixa': 'Data Baixa',
-        'Valor Total': 'Valor Total', 'Valor Liquido': 'Valor Total', 'Valor': 'Valor Total'
-    }
-    cols_existentes = {k: v for k, v in mapa.items() if k in df_raw.columns}
-    df = df_raw.rename(columns=cols_existentes)
-    for col in set(mapa.values()):
-        if col not in df.columns: df[col] = None
-    df = df[list(set(mapa.values()))]
-    
-    df['ID_BENNER'] = df['Número'].astype(str).str.strip()
-    df = df.drop_duplicates(subset=['ID_BENNER'], keep='last')
-    
-    # Auto-Conciliação
-    df['Data Baixa Temp'] = pd.to_datetime(df['Data Baixa'], errors='coerce')
-    df['STATUS_CONCILIACAO'] = "Pendente"
-    df['DATA_CONCILIACAO_SISTEMA'] = None
-    mask = df['Data Baixa Temp'].notna()
-    df.loc[mask, 'STATUS_CONCILIACAO'] = 'Conciliado'
-    df.loc[mask, 'DATA_CONCILIACAO_SISTEMA'] = datetime.now().strftime("%d/%m/%Y %H:%M")
-    df = df.drop(columns=['Data Baixa Temp'])
-    return df
-
-def marcar_benner_conciliado_robo(ids_benner):
-    db = carregar_db_benner()
-    if db.empty: return
-    data_hoje = datetime.now().strftime("%d/%m/%Y %H:%M")
-    mask = db['ID_BENNER'].astype(str).isin([str(x) for x in ids_benner])
-    db.loc[mask, 'STATUS_CONCILIACAO'] = 'Conciliado'
-    db.loc[mask, 'DATA_CONCILIACAO_SISTEMA'] = data_hoje
-    salvar_db_benner(db)
-
-# --- 4. INICIALIZAÇÃO E SIDEBAR ---
-if "db_benner" not in st.session_state: st.session_state.db_benner = carregar_db_benner()
-if "conflitos_pendentes" not in st.session_state: st.session_state.conflitos_pendentes = None
-if "novos_pendentes" not in st.session_state: st.session_state.novos_pendentes = None
-if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
-
-# States da Busca Avançada (Extrato)
+# --- 5. INICIALIZAÇÃO ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
 
-def limpar_filtros_extrato():
+if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
+if "db_benner" not in st.session_state: st.session_state.db_benner = carregar_db_benner()
+
+if st.session_state.dados_mestre is not None:
+    if "ID_HASH" not in st.session_state.dados_mestre.columns:
+        st.session_state.dados_mestre = None
+        st.rerun()
+
+def limpar_filtros_acao():
     st.session_state.filtro_mes = "Todos"
     st.session_state.filtro_banco = "Todos"
     st.session_state.filtro_tipo = "Todos"
     st.session_state.filtro_texto = ""
 
+# --- 6. BARRA LATERAL ---
 st.sidebar.title("Navegação")
-pagina = st.sidebar.radio("Ir para:", ["📁 Gestão Benner (Documentos)", "🔎 Busca Extrato", "🤝 Conciliação"])
+pagina = st.sidebar.radio("Módulo:", ["🔎 Busca Avançada (Extrato)", "📁 Gestão Benner (Documentos)", "🤝 Conciliação Automática"])
 st.sidebar.markdown("---")
-st.sidebar.title("Importar Arquivos")
+st.sidebar.title("📁 Importação")
 
-f_extrato = st.sidebar.file_uploader("1. Extrato Bancário (Excel)", type=["xlsx", "xlsm"])
-f_docs = st.sidebar.file_uploader("2. Documentos Benner (CSV/Excel)", type=["csv", "xlsx"])
+file_extrato = st.sidebar.file_uploader("1. Extrato Bancário (Excel)", type=["xlsx", "xlsm"])
+file_docs = st.sidebar.file_uploader("2. Documentos Benner (CSV/Excel)", type=["csv", "xlsx"])
 
-if f_extrato:
+if file_extrato:
     if st.session_state.dados_mestre is None:
-        st.session_state.dados_mestre = processar_extrato_inicial(f_extrato)
+        st.session_state.dados_mestre = processar_extrato_inicial(file_extrato)
         st.toast("Extrato carregado!", icon="✅")
 
-if f_docs:
-    if "ultimo_arq" not in st.session_state or st.session_state.ultimo_arq != f_docs.name:
-        try:
-            if f_docs.name.endswith('.csv'): df_up = pd.read_csv(f_docs, sep=None, engine='python')
-            else: df_up = pd.read_excel(f_docs)
-            
-            df_proc = preparar_dados_upload(df_up)
-            
-            db_atual = st.session_state.db_benner
-            if not db_atual.empty:
-                ids_db = set(db_atual['ID_BENNER'])
-                ids_new = set(df_proc['ID_BENNER'])
-                ids_conflito = ids_new.intersection(ids_db)
-                novos_puros = df_proc[~df_proc['ID_BENNER'].isin(ids_conflito)]
-                conflitos = df_proc[df_proc['ID_BENNER'].isin(ids_conflito)]
-            else:
-                novos_puros = df_proc
-                conflitos = pd.DataFrame()
-            
-            st.session_state.novos_pendentes = novos_puros
-            if not conflitos.empty:
-                st.session_state.conflitos_pendentes = conflitos
-                st.toast(f"⚠️ {len(conflitos)} registros já existem!", icon="⚠️")
-            else:
-                if not novos_puros.empty:
-                    df_final = pd.concat([db_atual, novos_puros], ignore_index=True)
-                    salvar_db_benner(df_final)
-                    st.toast(f"{len(novos_puros)} importados!", icon="✅")
-                    
-            st.session_state.ultimo_arq = f_docs.name
-        except Exception as e:
-            st.error(f"Erro no arquivo: {e}")
+if file_docs:
+    if "ultimo_arq_benner" not in st.session_state or st.session_state.ultimo_arq_benner != file_docs.name:
+        st.session_state.db_benner, novos, atualizados = processar_upload_benner(file_docs)
+        st.session_state.ultimo_arq_benner = file_docs.name
+        st.toast(f"Importação Concluída! {novos} novos, {atualizados} atualizados.", icon="💾")
 
 # ==============================================================================
-# TELA 1: GESTÃO BENNER
+# TELA 1: BUSCA AVANÇADA (EXTRATO)
 # ==============================================================================
-if pagina == "📁 Gestão Benner (Documentos)":
-    st.title("📁 Gestão de Documentos (Benner)")
-    
-    # 1. ZONA DE CONFLITO
-    if st.session_state.conflitos_pendentes is not None:
-        with st.container():
-            st.markdown("""<div class="conflict-box"><h3>⚠️ Duplicidade Identificada</h3><p>Registros do arquivo já existem na base. Escolha uma ação:</p></div>""", unsafe_allow_html=True)
-            col_old, col_new = st.columns(2)
-            ids_conf = st.session_state.conflitos_pendentes['ID_BENNER'].tolist()
-            db_old = st.session_state.db_benner[st.session_state.db_benner['ID_BENNER'].isin(ids_conf)]
-            
-            with col_old:
-                st.info("💾 No Banco (Atual)")
-                st.dataframe(db_old[['Número', 'Valor Total', 'Data Baixa', 'STATUS_CONCILIACAO']], hide_index=True)
-            with col_new:
-                st.warning("📄 No Arquivo (Novo)")
-                st.dataframe(st.session_state.conflitos_pendentes[['Número', 'Valor Total', 'Data Baixa', 'STATUS_CONCILIACAO']], hide_index=True)
-            
-            b1, b2 = st.columns(2)
-            if b1.button("🔄 SUBSTITUIR (Usar Novo)", type="primary"):
-                db_limpo = st.session_state.db_benner[~st.session_state.db_benner['ID_BENNER'].isin(ids_conf)]
-                df_final = pd.concat([db_limpo, st.session_state.conflitos_pendentes, st.session_state.novos_pendentes], ignore_index=True)
-                salvar_db_benner(df_final)
-                st.session_state.conflitos_pendentes = None
-                st.session_state.novos_pendentes = None
-                st.rerun()
-                
-            if b2.button("❌ IGNORAR (Manter Atual)", type="secondary"):
-                if st.session_state.novos_pendentes is not None and not st.session_state.novos_pendentes.empty:
-                    df_final = pd.concat([st.session_state.db_benner, st.session_state.novos_pendentes], ignore_index=True)
-                    salvar_db_benner(df_final)
-                st.session_state.conflitos_pendentes = None
-                st.session_state.novos_pendentes = None
-                st.rerun()
-        st.markdown("---")
-
-    # 2. TABELA PRINCIPAL
-    df = st.session_state.db_benner
-    if not df.empty:
-        df['Valor Total'] = pd.to_numeric(df['Valor Total'], errors='coerce').fillna(0)
-        df['Data de Vencimento'] = pd.to_datetime(df['Data de Vencimento'], errors='coerce')
-        
-        with st.expander("🌪️ Filtros & Exportação", expanded=True):
-            c1, c2, c3, c4 = st.columns(4)
-            status_opt = ["Todos", "Pendente", "Conciliado"]
-            f_status = c1.selectbox("Status", status_opt)
-            tipos = ["Todos"] + sorted(list(df['Tipo do Documento'].astype(str).unique()))
-            f_tipo = c2.selectbox("Banco / Tipo", tipos)
-            
-            min_d = df['Data de Vencimento'].min().date() if not df['Data de Vencimento'].dropna().empty else date.today()
-            max_d = df['Data de Vencimento'].max().date() if not df['Data de Vencimento'].dropna().empty else date.today()
-            d_ini = c3.date_input("Vencimento De", min_d)
-            d_fim = c4.date_input("Vencimento Até", max_d)
-            
-        df_view = df.copy()
-        if f_status != "Todos": df_view = df_view[df_view['STATUS_CONCILIACAO'] == f_status]
-        if f_tipo != "Todos": df_view = df_view[df_view['Tipo do Documento'] == f_tipo]
-        df_view = df_view[(df_view['Data de Vencimento'].dt.date >= d_ini) & (df_view['Data de Vencimento'].dt.date <= d_fim)]
-        
-        st.metric("Total Filtrado", f"R$ {df_view['Valor Total'].sum():,.2f}", f"{len(df_view)} documentos")
-        
-        st.dataframe(df_view, column_config={"Valor Total": st.column_config.NumberColumn(format="R$ %.2f"), "Data de Vencimento": st.column_config.DateColumn(format="DD/MM/YYYY"), "Data Baixa": st.column_config.DateColumn(format="DD/MM/YYYY")}, use_container_width=True, hide_index=True)
-        
-        ce1, ce2 = st.columns([3, 1])
-        with ce1: tipo_exp = st.radio("Exportar:", ["Dados da Tela", "Pendentes", "Conciliados", "Tudo"], horizontal=True)
-        with ce2:
-            st.write("")
-            if tipo_exp == "Dados da Tela": df_exp = df_view
-            elif tipo_exp == "Pendentes": df_exp = df[df['STATUS_CONCILIACAO'] == 'Pendente']
-            elif tipo_exp == "Conciliados": df_exp = df[df['STATUS_CONCILIACAO'] == 'Conciliado']
-            else: df_exp = df
-            st.download_button("📥 BAIXAR CSV", df_exp.to_csv(index=False).encode('utf-8'), "benner_export.csv", "text/csv")
-
-        st.markdown("---")
-        with st.expander("⚠️ Zona de Perigo"):
-            if st.button("🗑️ ZERAR BASE DE DADOS", type="primary"):
-                zerar_base()
-                st.rerun()
-    else:
-        st.info("Base vazia. Importe um arquivo na barra lateral.")
-
-# ==============================================================================
-# TELA 2: EXTRATO (RESTAURADA)
-# ==============================================================================
-elif pagina == "🔎 Busca Extrato":
+if pagina == "🔎 Busca Avançada (Extrato)":
     st.title("📊 Painel Extrato Bancário")
     
     if st.session_state.dados_mestre is not None:
         df_master = st.session_state.dados_mestre
         
-        # Filtros
+        hoje = datetime.now().strftime("%d/%m/%Y")
+        conc_hoje = df_master[df_master["DATA_CONCILIACAO"].astype(str).str.contains(hoje, na=False)]
+        
+        st.markdown("### 📈 Produção do Dia")
+        m1, m2, m3 = st.columns([1, 1, 2])
+        m1.metric("Qtd. Conciliados Hoje", f"{len(conc_hoje)}")
+        m2.metric("Valor Conciliado Hoje", formatar_br(conc_hoje["VALOR"].sum()))
+        m3.caption("Métricas baseadas na data de sistema.")
+        st.markdown("---")
+        
         with st.container():
             with st.expander("🌪️ Filtros Avançados", expanded=True):
                 c1, c2, c3 = st.columns(3)
@@ -414,35 +360,47 @@ elif pagina == "🔎 Busca Extrato":
                 sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
                 tipos = ["Todos", "CRÉDITO", "DÉBITO"]
                 sel_tipo = c3.selectbox("🔄 Tipo de Movimento:", tipos, key="filtro_tipo")
-                if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_extrato): pass
+                if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao): pass
         
         df_f = df_master.copy()
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
         if st.session_state.filtro_banco != "Todos": df_f = df_f[df_f["BANCO"] == st.session_state.filtro_banco]
         if st.session_state.filtro_tipo != "Todos": df_f = df_f[df_f["TIPO"] == st.session_state.filtro_tipo]
 
+        st.markdown("###")
         busca = st.text_input("🔎 Pesquisa Rápida (Valor ou Nome)", key="filtro_texto", placeholder="Ex: 483,71 ou Nome...")
+
         if busca:
             termo = busca.strip()
-            # Lógica de busca mantida
-            if any(char.isdigit() for char in termo) and not termo.replace('.','').isdigit():
-                 # Tenta valor aproximado
-                 try:
-                     val = float(termo.replace('R$','').replace('.','').replace(',','.'))
-                     df_f = df_f[(df_f["VALOR"].abs() - val).abs() <= 0.1]
-                 except: df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
+            if termo.endswith('.'):
+                if termo[:-1].replace('.', '').isdigit():
+                    df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
+                else:
+                    df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
+            elif any(char.isdigit() for char in termo):
+                try:
+                    limpo = termo.replace('R$', '').replace(' ', '')
+                    if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
+                    else: limpo = limpo.replace('.', '') 
+                    valor_busca = float(limpo)
+                    df_f = df_f[(df_f["VALOR"].abs() - valor_busca).abs() <= 0.10]
+                except:
+                    df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
             else:
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
 
         if not df_f.empty:
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Itens", len(df_f))
-            k2.metric("Créditos", formatar_br(ent))
-            k3.metric("Débitos", formatar_br(sai))
             
-            # Tabela Editável
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Itens na Tela", f"{len(df_f)}")
+            k2.metric("Entradas", formatar_br(ent), delta="Crédito")
+            k3.metric("Saídas", formatar_br(sai), delta="-Débito", delta_color="inverse")
+            k4.metric("Saldo", formatar_br(ent + sai))
+            
+            st.markdown("---")
+            
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_HASH"]
             df_show = df_f[cols_order].copy()
             df_show["DATA"] = df_show["DATA"].dt.date
@@ -452,54 +410,206 @@ elif pagina == "🔎 Busca Extrato":
                 use_container_width=True,
                 hide_index=True,
                 height=500,
-                key="editor_extrato",
+                key="editor_principal",
                 column_config={
                     "CONCILIADO": st.column_config.CheckboxColumn("Conciliado?", default=False),
                     "DATA_CONCILIACAO": st.column_config.TextColumn("Data Visto", disabled=True),
                     "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY", disabled=True),
-                    "VALOR": st.column_config.NumberColumn("Valor", format="R$ %.2f", disabled=True),
+                    "BANCO": st.column_config.TextColumn("Instituição", disabled=True),
+                    "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large", disabled=True),
+                    "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", disabled=True),
+                    "TIPO": st.column_config.TextColumn("Tipo", disabled=True),
                     "ID_HASH": None
                 }
             )
             
-            # Salva alterações
-            mudou = False
-            for idx, row in edited_df.iterrows():
-                id_h = row['ID_HASH']
-                conc_new = row['CONCILIADO']
-                idx_m = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_HASH'] == id_h].tolist()
-                if idx_m:
-                    i = idx_m[0]
-                    conc_old = st.session_state.dados_mestre.at[i, 'CONCILIADO']
-                    if conc_new != conc_old:
-                        st.session_state.dados_mestre.at[i, 'CONCILIADO'] = conc_new
-                        st.session_state.dados_mestre.at[i, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M") if conc_new else None
-                        mudou = True
-            
-            if mudou:
+            needs_rerun = False
+            mudou_algo = False
+            for index, row in edited_df.iterrows():
+                id_hash = row['ID_HASH']
+                conciliado_novo = row['CONCILIADO']
+                idx_master = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_HASH'] == id_hash].tolist()
+                
+                if idx_master:
+                    idx = idx_master[0]
+                    conciliado_antigo = st.session_state.dados_mestre.at[idx, 'CONCILIADO']
+                    if conciliado_novo != conciliado_antigo:
+                        st.session_state.dados_mestre.at[idx, 'CONCILIADO'] = conciliado_novo
+                        if conciliado_novo:
+                            st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                        else:
+                            st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = None
+                        needs_rerun = True
+                        mudou_algo = True
+
+            if mudou_algo:
                 salvar_historico_extrato(st.session_state.dados_mestre)
-                st.rerun()
+                st.toast("Salvo no Histórico!", icon="💾")
+            if needs_rerun: st.rerun()
+
+            st.write("---")
+            st.subheader("📤 Exportar Dados")
+            
+            col_sel, col_btn = st.columns([2, 1])
+            with col_sel:
+                tipo_export = st.radio("O que você deseja baixar?", ["Dados da Tela", "Apenas Conciliados", "Tudo"], horizontal=True)
+
+            with col_btn:
+                st.write("")
+                st.write("") 
+                if tipo_export == "Dados da Tela":
+                    ids_na_tela = df_f['ID_HASH'].tolist()
+                    df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_HASH'].isin(ids_na_tela)].copy()
+                elif tipo_export == "Apenas Conciliados":
+                    df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['CONCILIADO'] == True].copy()
+                else:
+                    df_export = st.session_state.dados_mestre.copy()
+                
+                df_export["CONCILIADO"] = df_export["CONCILIADO"].apply(lambda x: "Sim" if x else "Não")
+                dados_excel = to_excel(df_export)
+                st.download_button(label=f"📥 BAIXAR: {tipo_export.upper()}", data=dados_excel, file_name="extrato_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("Nenhum dado encontrado com os filtros.")
+            st.warning("🔍 Nenhum dado encontrado.")
     else:
-        st.info("Carregue o Extrato na barra lateral.")
+        st.info("👈 Para começar, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
-# TELA 3: CONCILIAÇÃO (RESTAURADA E ADAPTADA AO NOVO DB)
+# TELA 2: GESTÃO BENNER (DOCUMENTOS)
 # ==============================================================================
-elif pagina == "🤝 Conciliação":
-    st.title("Conciliação Automática")
+elif pagina == "📁 Gestão Benner (Documentos)":
+    st.title("📁 Base de Dados Benner")
+    st.markdown("Gestão de todos os documentos carregados no sistema (Histórico Acumulado).")
+    
+    # --- BOTÃO ZERAR BASE ---
+    with st.expander("⚠️ Zona de Perigo (Limpar Dados)", expanded=False):
+        st.warning("Atenção: Isso apagará todo o histórico de documentos do Benner importados.")
+        if st.button("🗑️ ZERAR BASE DE DADOS (Começar do Zero)", type="primary"):
+            zerar_base_benner()
+            st.rerun()
+            
+    st.markdown("---")
     
     df_benner = st.session_state.db_benner
+    
     if not df_benner.empty:
-        # Prepara dados do Benner para o Robô (Adaptação)
+        df_benner['Valor Total'] = pd.to_numeric(df_benner['Valor Total'], errors='coerce').fillna(0)
+        df_benner['Data de Vencimento'] = pd.to_datetime(df_benner['Data de Vencimento'], errors='coerce')
+        df_benner['Data Baixa'] = pd.to_datetime(df_benner['Data Baixa'], errors='coerce')
+        
+        # --- FILTROS DE VISUALIZAÇÃO/EXPORTAÇÃO (RESTAURADOS) ---
+        with st.expander("🌪️ Filtros de Exportação e Visualização", expanded=True):
+            f1, f2, f3, f4 = st.columns(4)
+            
+            # 1. Filtro de Status
+            status_filter = f1.selectbox("Status", ["Todos", "Pendente", "Conciliado"])
+            
+            # 2. Filtro de Tipo/Banco
+            tipos_disponiveis = ["Todos"] + sorted(list(df_benner['Tipo do Documento'].dropna().unique()))
+            tipo_filter = f2.selectbox("Tipo / Banco", tipos_disponiveis)
+            
+            # 3. Filtro de Datas (Vencimento)
+            min_date = df_benner['Data de Vencimento'].min().date() if not df_benner.empty else datetime.now().date()
+            max_date = df_benner['Data de Vencimento'].max().date() if not df_benner.empty else datetime.now().date()
+            
+            data_ini = f3.date_input("Vencimento De", value=min_date)
+            data_fim = f4.date_input("Vencimento Até", value=max_date)
+
+        # --- APLICAÇÃO DOS FILTROS ---
+        df_view = df_benner.copy()
+        
+        # Filtro Status
+        if status_filter != "Todos":
+            df_view = df_view[df_view['STATUS_CONCILIACAO'] == status_filter]
+        
+        # Filtro Tipo
+        if tipo_filter != "Todos":
+            df_view = df_view[df_view['Tipo do Documento'] == tipo_filter]
+            
+        # Filtro Data
+        if not df_view.empty:
+            df_view = df_view[
+                (df_view['Data de Vencimento'].dt.date >= data_ini) & 
+                (df_view['Data de Vencimento'].dt.date <= data_fim)
+            ]
+            
+        # --- MÉTRICAS ---
+        total_docs = len(df_view)
+        total_valor = df_view['Valor Total'].sum()
+        
+        k1, k2 = st.columns(2)
+        k1.metric("Documentos Filtrados", total_docs)
+        k2.metric("Valor Total Filtrado", formatar_br(total_valor))
+        
+        st.markdown("### 📋 Tabela Filtrada")
+        st.dataframe(
+            df_view,
+            use_container_width=True,
+            column_config={
+                "Valor Total": st.column_config.NumberColumn("Valor Total", format="R$ %.2f"),
+                "Data de Vencimento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
+                "Data Baixa": st.column_config.DateColumn("Baixa", format="DD/MM/YYYY"),
+                "STATUS_CONCILIACAO": st.column_config.TextColumn("Status", width="small")
+            },
+            hide_index=True
+        )
+        
+        st.write("---")
+        st.subheader("📤 Exportar Dados (Benner)")
+        
+        col_sel_b, col_btn_b = st.columns([2, 1])
+        
+        with col_sel_b:
+            export_mode = st.radio(
+                "O que baixar?", 
+                ["Dados Filtrados (Tela)", "Apenas Pendentes (Geral)", "Apenas Conciliados (Geral)", "Base Completa"],
+                horizontal=True,
+                key="export_benner_radio"
+            )
+            
+        with col_btn_b:
+            st.write("")
+            st.write("")
+            
+            if export_mode == "Dados Filtrados (Tela)":
+                df_export_b = df_view.copy()
+            elif export_mode == "Apenas Pendentes (Geral)":
+                df_export_b = df_benner[df_benner['STATUS_CONCILIACAO'] == 'Pendente'].copy()
+            elif export_mode == "Apenas Conciliados (Geral)":
+                df_export_b = df_benner[df_benner['STATUS_CONCILIACAO'] == 'Conciliado'].copy()
+            else:
+                df_export_b = df_benner.copy()
+                
+            st.download_button(
+                label=f"📥 BAIXAR: {export_mode.upper()}",
+                data=df_export_b.to_csv(index=False).encode('utf-8'),
+                file_name="relatorio_benner.csv",
+                mime="text/csv"
+            )
+        
+    else:
+        st.info("Nenhum dado do Benner encontrado. Carregue um arquivo 'Documentos' na barra lateral.")
+
+# ==============================================================================
+# TELA 3: CONCILIAÇÃO AUTOMÁTICA
+# ==============================================================================
+elif pagina == "🤝 Conciliação Automática":
+    st.title("Conciliação Bancária")
+    st.markdown("Cruzamento entre **Extrato** e **Base Benner**.")
+    
+    df_benner = st.session_state.db_benner
+    
+    if not df_benner.empty:
+        # Pega apenas Pendentes
         df_docs_proc = df_benner[df_benner['STATUS_CONCILIACAO'] == 'Pendente'].copy()
         
-        # Garante colunas numéricas
-        df_docs_proc["VALOR_REF"] = pd.to_numeric(df_docs_proc["Valor Total"], errors='coerce').fillna(0)
+        col_valor = "Valor Total" if "Valor Total" in df_docs_proc.columns else "Valor Baixa"
+        df_docs_proc["VALOR_REF"] = pd.to_numeric(df_docs_proc[col_valor], errors='coerce').fillna(0)
         df_docs_proc["DESC_REF"] = df_docs_proc["Nome"].astype(str) + " " + df_docs_proc["Número"].astype(str)
         df_docs_proc["DESC_CLEAN"] = df_docs_proc["Nome"].astype(str).apply(limpar_descricao)
-        df_docs_proc["DATA_REF"] = pd.to_datetime(df_docs_proc["Data de Vencimento"], errors='coerce')
+        
+        df_docs_proc["DATA_REF"] = pd.to_datetime(df_docs_proc["Data Baixa"], errors='coerce')
+        df_docs_proc["DATA_REF"] = df_docs_proc["DATA_REF"].fillna(pd.to_datetime(df_docs_proc["Data de Vencimento"], errors='coerce'))
+        
         df_docs_proc["ID_UNICO"] = df_docs_proc["ID_BENNER"]
     else:
         df_docs_proc = None
@@ -530,7 +640,7 @@ elif pagina == "🤝 Conciliação":
                     if b['CONCILIADO']: continue 
                     
                     val_banco = abs(b['VALOR'])
-                    if abs(val_doc - val_banco) <= 0.10: # Tolerância 10 centavos
+                    if abs(val_doc - val_banco) <= 0.10:
                         candidatos.append(b)
                 
                 if not candidatos: continue
@@ -551,6 +661,7 @@ elif pagina == "🤝 Conciliação":
                         "Descrição Benner": doc['DESC_REF'],
                         "Data Benner": formatar_data(doc['DATA_REF']),
                         "Valor Benner": formatar_br(doc['VALOR_REF']),
+                        "Diferença": f"{round(doc['VALOR_REF'] - abs(melhor_match['VALOR']), 2):.2f}",
                         "Match Score": f"{maior_score}%",
                         "ID_HASH_EXTRATO": melhor_match['ID_HASH'],
                         "ID_BENNER": doc['ID_BENNER']
@@ -565,21 +676,24 @@ elif pagina == "🤝 Conciliação":
                 st.success(f"✅ {len(df_results)} Pares Encontrados!")
                 st.dataframe(df_results.drop(columns=["ID_HASH_EXTRATO", "ID_BENNER"]), use_container_width=True)
                 
-                if st.button("💾 CONFIRMAR E SALVAR"):
-                    # Atualiza Extrato
+                if st.button("💾 CONFIRMAR CONCILIAÇÃO E SALVAR NAS BASES"):
                     ids_extrato = [m['ID_HASH_EXTRATO'] for m in matches]
                     mask_ext = st.session_state.dados_mestre['ID_HASH'].isin(ids_extrato)
                     st.session_state.dados_mestre.loc[mask_ext, 'CONCILIADO'] = True
                     st.session_state.dados_mestre.loc[mask_ext, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
                     salvar_historico_extrato(st.session_state.dados_mestre)
                     
-                    # Atualiza Benner
                     ids_benner = [m['ID_BENNER'] for m in matches]
-                    marcar_benner_conciliado_robo(ids_benner)
+                    marcar_benner_como_conciliado(ids_benner)
                     
-                    st.success("Tudo salvo!")
+                    st.success("Bases de Dados Atualizadas com Sucesso! (Extrato e Benner)")
                     st.balloons()
+
+                col_exp_conc, _ = st.columns([1, 2])
+                with col_exp_conc:
+                    dados_conc = to_excel(df_results.drop(columns=["ID_HASH_EXTRATO", "ID_BENNER"]))
+                    st.download_button(label="📥 BAIXAR RELATÓRIO (XLSX)", data=dados_conc, file_name="relatorio_conciliacao.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
-                st.warning("Nada encontrado automaticamente.")
+                st.warning("Nenhuma conciliação encontrada nos itens pendentes.")
     else:
-        st.info("Carregue Extrato e Documentos para conciliar.")
+        st.info("Carregue Extrato e Documentos (Benner) na barra lateral.")
