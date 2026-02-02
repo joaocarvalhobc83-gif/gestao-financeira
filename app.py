@@ -56,7 +56,6 @@ def to_excel(df_to_download):
     return output.getvalue()
 
 # --- 2. CARREGAMENTO COM UPLOAD (MODIFICADO) ---
-# Removemos o carregamento fixo e colocamos o File Uploader
 st.sidebar.title("📁 Arquivo")
 uploaded_file = st.sidebar.file_uploader("Carregue o Extrato (Excel)", type=["xlsx", "xlsm"])
 
@@ -122,29 +121,36 @@ if uploaded_file is not None:
 
         st.markdown("---")
 
-        # --- 6. BUSCA E KPIs ---
+        # --- 6. BUSCA E KPIs (AQUI FOI FEITO O AJUSTE) ---
         col_busca, col_vazio = st.columns([3, 1])
         with col_busca:
-            busca = st.text_input("🔍 Pesquisa Avançada", placeholder="Digite 1000 (Valor Exato) ou 1. (Inicia com...)", key="busca_input")
+            busca = st.text_input("🔍 Pesquisa Avançada", placeholder="Digite o valor (ex: 1000) ou parte do nome...", key="busca_input")
         
         if busca:
             termo = busca.strip()
             st.session_state.arquivo_pronto = False 
             
+            # 1. Busca Visual (começa com ponto ex: 1000.)
             if termo.endswith('.'):
                 if termo[:-1].replace('.', '').isdigit():
                     df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
                     st.success(f"👁️ Visual: Iniciados em **'{termo}'**")
                 else:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False, regex=False)]
+            
+            # 2. Busca Numérica com Tolerância de Centavos
             elif any(char.isdigit() for char in termo):
                 try:
                     limpo = termo.replace('R$', '').replace(' ', '')
                     if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
-                    df_f = df_f[(df_f["VALOR"] - valor_busca).abs() < 0.01]
-                    st.success(f"🎯 Exato: **R$ {valor_busca:,.2f}**")
+                    
+                    # --- AJUSTE AQUI: MUDANÇA DA TOLERÂNCIA DE 0.01 PARA 0.10 ---
+                    # Isso permite encontrar valores com diferença de até 10 centavos para mais ou menos
+                    df_f = df_f[(df_f["VALOR"] - valor_busca).abs() <= 0.10]
+                    
+                    st.success(f"🎯 Busca Flexível (±R$ 0,10): **R$ {valor_busca:,.2f}**")
                 except ValueError:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
             else:
