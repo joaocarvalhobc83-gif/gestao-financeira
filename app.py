@@ -24,6 +24,7 @@ st.markdown("""
         border: 1px solid rgba(255, 255, 255, 0.1);
         border-radius: 16px;
         padding: 20px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
     }
     
     .stTextInput > div > div > input, .stSelectbox > div > div > div, .stDateInput > div > div > input {
@@ -65,6 +66,12 @@ st.markdown("""
         margin-bottom: 20px;
         color: #fbbf24;
     }
+    
+    [data-testid="stDataFrame"] {
+        background-color: rgba(30, 41, 59, 0.3);
+        border-radius: 10px;
+        padding: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,6 +100,10 @@ def converter_valor(valor):
 
 def gerar_hash(row):
     return hashlib.md5(f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}".encode()).hexdigest()
+
+def formatar_visual_db(valor):
+    try: return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except: return ""
 
 @st.cache_data(show_spinner=False)
 def to_excel(df):
@@ -142,6 +153,7 @@ def process_extrato(file):
         df['ID_HASH'] = df.apply(gerar_hash, axis=1)
         df["MES_ANO"] = df["DATA"].dt.strftime('%m/%Y')
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
+        df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         
         hist = load_hist_extrato()
@@ -322,7 +334,6 @@ if pagina == "📁 Gestão Benner":
             elif tipo_exp == "Conciliados": df_exp = df[df['STATUS_CONCILIACAO'] == 'Conciliado']
             else: df_exp = df
             
-            # EXPORTAÇÃO ALTERADA PARA XLSX
             st.download_button(
                 label="📥 BAIXAR EXCEL",
                 data=to_excel(df_exp),
@@ -347,17 +358,25 @@ elif pagina == "🔎 Busca Extrato":
     if st.session_state.dados_mestre is not None:
         df_master = st.session_state.dados_mestre
         
+        hoje = datetime.now().strftime("%d/%m/%Y")
+        conc_hoje = df_master[df_master["DATA_CONCILIACAO"].astype(str).str.contains(hoje, na=False)]
+        
+        # Métricas do dia
+        c1, c2 = st.columns(2)
+        c1.metric("Conciliados Hoje", len(conc_hoje))
+        c2.metric("Valor Hoje", formatar_br(conc_hoje["VALOR"].sum()))
+        st.markdown("---")
+
         # Filtros Avançados
-        with st.container():
-            with st.expander("🌪️ Filtros Avançados", expanded=True):
-                c1, c2, c3 = st.columns(3)
-                meses = ["Todos"] + sorted(df_master["MES_ANO"].unique().tolist(), reverse=True)
-                sel_mes = c1.selectbox("📅 Mês:", meses, key="filtro_mes")
-                bancos = ["Todos"] + sorted(df_master["BANCO"].unique().tolist())
-                sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
-                tipos = ["Todos", "CRÉDITO", "DÉBITO"]
-                sel_tipo = c3.selectbox("🔄 Tipo:", tipos, key="filtro_tipo")
-                if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_extrato): pass
+        with st.expander("🌪️ Filtros Avançados", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            meses = ["Todos"] + sorted(df_master["MES_ANO"].unique().tolist(), reverse=True)
+            sel_mes = c1.selectbox("📅 Mês:", meses, key="filtro_mes")
+            bancos = ["Todos"] + sorted(df_master["BANCO"].unique().tolist())
+            sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
+            tipos = ["Todos", "CRÉDITO", "DÉBITO"]
+            sel_tipo = c3.selectbox("🔄 Tipo:", tipos, key="filtro_tipo")
+            if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_extrato): pass
         
         df_f = df_master.copy()
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
@@ -383,8 +402,12 @@ elif pagina == "🔎 Busca Extrato":
             k2.metric("Créditos", formatar_br(ent))
             k3.metric("Débitos", formatar_br(sai))
             
+            # Tabela Editável
+            df_show = df_f.copy()
+            df_show["DATA"] = df_show["DATA"].dt.date
+            
             edited = st.data_editor(
-                df_f[["CONCILIADO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "ID_HASH"]],
+                df_show[["CONCILIADO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "ID_HASH"]],
                 hide_index=True,
                 use_container_width=True,
                 height=500,
@@ -394,18 +417,28 @@ elif pagina == "🔎 Busca Extrato":
             ids_conc = edited[edited["CONCILIADO"]==True]["ID_HASH"].tolist()
             if ids_conc:
                 mask = st.session_state.dados_mestre["ID_HASH"].isin(ids_conc)
-                if not st.session_state.dados_mestre.loc[mask, "CONCILIADO"].all():
+                # Verifica se houve mudança para salvar
+                changed = False
+                for i_hash in ids_conc:
+                    if not st.session_state.dados_mestre.loc[st.session_state.dados_mestre["ID_HASH"]==i_hash, "CONCILIADO"].values[0]:
+                        changed = True
+                
+                # Desconciliação
+                ids_unconc = edited[edited["CONCILIADO"]==False]["ID_HASH"].tolist()
+                mask_un = st.session_state.dados_mestre["ID_HASH"].isin(ids_unconc) & st.session_state.dados_mestre["ID_HASH"].isin(df_f["ID_HASH"])
+                if st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"].any():
+                     changed = True
+
+                if changed:
                     st.session_state.dados_mestre.loc[mask, "CONCILIADO"] = True
+                    st.session_state.dados_mestre.loc[mask, "DATA_CONCILIACAO"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    st.session_state.dados_mestre.loc[mask_un, "CONCILIADO"] = False
+                    st.session_state.dados_mestre.loc[mask_un, "DATA_CONCILIACAO"] = None
                     save_hist_extrato(st.session_state.dados_mestre)
-                    st.toast("Salvo!")
+                    st.toast("Alterações Salvas!")
             
-            # EXPORTAÇÃO ALTERADA PARA XLSX
-            st.download_button(
-                label="📥 BAIXAR EXTRATO (XLSX)",
-                data=to_excel(df_f),
-                file_name="extrato_filtrado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # EXPORTAÇÃO EXCEL
+            st.download_button("📥 BAIXAR EXTRATO (XLSX)", to_excel(df_f), "extrato_filtrado.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             
         else:
             st.warning("Nenhum dado encontrado.")
@@ -413,7 +446,7 @@ elif pagina == "🔎 Busca Extrato":
         st.info("Carregue o extrato.")
 
 # ==============================================================================
-# ABA 3: CONCILIAÇÃO (RESTAURADA)
+# ABA 3: CONCILIAÇÃO (RESTAURADA - FILTROS + PESQUISA)
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("🤝 Conciliação Automática")
@@ -436,11 +469,10 @@ elif pagina == "🤝 Conciliação Automática":
         df_bn_robo["VALOR_REF"] = pd.to_numeric(df_bn_robo["Valor Total"], errors='coerce').fillna(0)
         df_bn_robo["DESC_CLEAN"] = df_bn_robo["Nome"].astype(str).apply(limpar_descricao)
         
-        st.info(f"Escopo: {len(df_ex_robo)} itens do extrato vs {len(df_bn_robo)} documentos pendentes.")
+        st.info(f"Escopo da Pesquisa: {len(df_ex_robo)} itens do extrato vs {len(df_bn_robo)} documentos pendentes.")
         
-        if st.button("🚀 EXECUTAR ROBÔ"):
+        if st.button("🚀 PESQUISAR CONCILIAÇÃO"):
             matches = []
-            used_bn = set()
             l_ex = df_ex_robo.to_dict('records')
             l_bn = df_bn_robo.to_dict('records')
             pbar = st.progress(0)
@@ -470,18 +502,12 @@ elif pagina == "🤝 Conciliação Automática":
             
             if matches:
                 res = pd.DataFrame(matches)
-                st.success(f"{len(res)} Matches!")
+                st.success(f"{len(res)} Matches Encontrados!")
                 st.dataframe(res.drop(columns=["ID_HASH", "ID_BENNER"]), hide_index=True)
                 
-                # EXPORTAÇÃO DO RELATÓRIO EM XLSX
-                st.download_button(
-                    label="📥 BAIXAR RELATÓRIO (XLSX)",
-                    data=to_excel(res.drop(columns=["ID_HASH", "ID_BENNER"])),
-                    file_name="relatorio_matches.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("📥 BAIXAR MATCHES (XLSX)", to_excel(res.drop(columns=["ID_HASH", "ID_BENNER"])), "matches.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 
-                if st.button("💾 CONFIRMAR CONCILIAÇÃO"):
+                if st.button("💾 CONFIRMAR E SALVAR CONCILIAÇÃO"):
                     ids_ex = [m['ID_HASH'] for m in matches]
                     mask = st.session_state.dados_mestre['ID_HASH'].isin(ids_ex)
                     st.session_state.dados_mestre.loc[mask, 'CONCILIADO'] = True
