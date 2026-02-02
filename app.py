@@ -156,13 +156,10 @@ def process_extrato(file):
         df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         
-        hist = load_hist_extrato()
-        if not hist.empty:
-            df = df.merge(hist, on="ID_HASH", how="left")
-            df["CONCILIADO"] = df["CONCILIADO"].apply(lambda x: True if str(x).lower() == 'true' else False)
-        else:
-            df["CONCILIADO"] = False
-            df["DATA_CONCILIACAO"] = None
+        # Inicializa colunas
+        df["CONCILIADO"] = False
+        df["DATA_CONCILIACAO"] = None
+        
         return df
     except: return None
 
@@ -179,51 +176,65 @@ def sync_extrato_com_historico():
                 lambda row: pd.Series(atualizar_row(row)), axis=1
             )
 
-# --- FUNÇÃO NOVA: CONCILIAÇÃO REVERSA (BENNER -> EXTRATO) ---
+# --- FUNÇÃO NOVA: CONCILIAÇÃO REVERSA INTELIGENTE (BENNER -> EXTRATO) ---
 def auto_conciliar_extrato_pelo_benner(df_benner_atual):
     """
     Varre os itens do Benner que têm Data Baixa e tenta encontrar/marcar no Extrato.
+    Agora considera também DATA + DESCRIÇÃO caso o valor não bata exatamente.
     """
     if st.session_state.dados_mestre is None: return 0
     
-    # Filtra apenas o que tem data de baixa no Benner
     baixados = df_benner_atual[df_benner_atual['Data Baixa'].notna()].copy()
-    
-    # Filtra extrato pendente
     extrato_pendente = st.session_state.dados_mestre[st.session_state.dados_mestre['CONCILIADO'] == False].copy()
+    
     if extrato_pendente.empty or baixados.empty: return 0
     
     count_matches = 0
     ids_para_conciliar = []
     
-    # Cria lista para iterar rápido
+    # Prepara Extrato para Busca
+    extrato_pendente['DESC_CLEAN'] = extrato_pendente['DESCRIÇÃO'].apply(limpar_descricao)
     lista_ext = extrato_pendente.to_dict('records')
     
-    # Converte coluna Valor do Benner
+    # Prepara Benner
     col_valor = 'Valor Total' if 'Valor Total' in baixados.columns else 'Valor Baixa'
     baixados['VALOR_NUM'] = pd.to_numeric(baixados[col_valor], errors='coerce').fillna(0)
+    baixados['DESC_REF_CLEAN'] = baixados['Nome'].astype(str).apply(limpar_descricao)
     
     # Itera sobre os baixados do Benner
     for _, doc in baixados.iterrows():
         val_doc = doc['VALOR_NUM']
         if val_doc <= 0: continue
         
-        # Procura no extrato (Valor Igual + Data Próxima 5 dias)
         data_doc = pd.to_datetime(doc['Data Baixa'])
-        
         candidato_match = None
         
+        # --- TENTATIVA 1: VALOR EXATO (Margem Pequena) + DATA PRÓXIMA (5 dias) ---
         for ext in lista_ext:
-            if ext['ID_HASH'] in ids_para_conciliar: continue # Já usado nesta rodada
+            if ext['ID_HASH'] in ids_para_conciliar: continue
             
-            # Checa Valor (Margem 0.05 centavos)
             if abs(abs(ext['VALOR']) - val_doc) <= 0.05:
-                # Checa Data (Janela de 5 dias)
                 delta_dias = abs((ext['DATA'] - data_doc).days)
                 if delta_dias <= 5:
                     candidato_match = ext['ID_HASH']
-                    break # Achou um match válido, para de procurar p/ este documento
+                    break 
         
+        # --- TENTATIVA 2: DATA MUITO PRÓXIMA (3 dias) + DESCRIÇÃO SIMILAR ---
+        # (Se o valor não bateu, verifica se é o mesmo evento pela descrição e data)
+        if not candidato_match:
+             for ext in lista_ext:
+                if ext['ID_HASH'] in ids_para_conciliar: continue
+                
+                # Janela de data mais curta para garantir
+                delta_dias = abs((ext['DATA'] - data_doc).days)
+                
+                if delta_dias <= 3:
+                    # Compara nomes
+                    score = fuzz.token_set_ratio(doc['DESC_REF_CLEAN'], ext['DESC_CLEAN'])
+                    if score > 85: # Confiança alta no nome
+                        candidato_match = ext['ID_HASH']
+                        break
+
         if candidato_match:
             ids_para_conciliar.append(candidato_match)
             count_matches += 1
@@ -270,6 +281,7 @@ def prepare_benner_upload(df_raw):
     df['ID_BENNER'] = df['Número'].astype(str).str.strip()
     df = df.drop_duplicates(subset=['ID_BENNER'], keep='last')
     
+    # Auto-conciliação
     df['Data Baixa'] = pd.to_datetime(df['Data Baixa'], errors='coerce')
     df['STATUS_CONCILIACAO'] = df['Data Baixa'].apply(lambda x: 'Conciliado' if pd.notnull(x) else 'Pendente')
     return df
@@ -369,11 +381,10 @@ if pagina == "📁 Gestão Benner":
             # SUBSTITUIR
             if b1.button("🔄 SUBSTITUIR (Usar Novo)", type="primary"):
                 db_clean = st.session_state.db_benner[~st.session_state.db_benner['ID_BENNER'].isin(ids_c)]
-                # Junta tudo
                 final = pd.concat([db_clean, st.session_state.conflitos, st.session_state.novos], ignore_index=True)
                 save_db_benner(final)
                 
-                # Roda auto-conciliação nos novos e nos conflitos (que agora são os novos)
+                # Roda auto-conciliação NOS NOVOS + CONFLITOS (que agora são novos)
                 tudo_novo = pd.concat([st.session_state.conflitos, st.session_state.novos], ignore_index=True)
                 qtd = auto_conciliar_extrato_pelo_benner(tudo_novo)
                 if qtd > 0: st.toast(f"{qtd} itens conciliados automaticamente no Extrato!", icon="✨")
@@ -388,7 +399,7 @@ if pagina == "📁 Gestão Benner":
                     final = pd.concat([st.session_state.db_benner, st.session_state.novos], ignore_index=True)
                     save_db_benner(final)
                     
-                    # Roda auto-conciliação SÓ nos novos (ignorou os conflitos)
+                    # Roda auto-conciliação SÓ nos novos
                     qtd = auto_conciliar_extrato_pelo_benner(st.session_state.novos)
                     if qtd > 0: st.toast(f"{qtd} itens conciliados automaticamente no Extrato!", icon="✨")
                 
@@ -456,6 +467,7 @@ elif pagina == "🔎 Busca Extrato":
         hoje = datetime.now().strftime("%d/%m/%Y")
         conc_hoje = df_master[df_master["DATA_CONCILIACAO"].astype(str).str.contains(hoje, na=False)]
         
+        # Métricas do dia
         c1, c2 = st.columns(2)
         c1.metric("Conciliados Hoje", len(conc_hoje))
         c2.metric("Valor Hoje", formatar_br(conc_hoje["VALOR"].sum()))
