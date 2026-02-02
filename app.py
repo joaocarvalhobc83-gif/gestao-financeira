@@ -5,7 +5,7 @@ from datetime import datetime
 from io import BytesIO
 from rapidfuzz import process, fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO (INTACTO) ---
+# --- 1. CONFIGURAÇÃO E ESTILO ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
 st.markdown("""
@@ -74,24 +74,34 @@ def formatar_data(dt):
 
 def limpar_descricao(texto):
     texto = str(texto).upper()
-    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB", "ELET", "COMPRA", "CARTAO", "ENVIADA", "RECEBIDA", "AUTORIZADO", "LTDA", "SA", "S/A"]
+    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB", "ELET", "COMPRA", "CARTAO", "ENVIADA", "RECEBIDA", "AUTORIZADO"]
     for termo in termos_inuteis:
         texto = texto.replace(termo, "")
     texto = re.sub(r'[^A-Z0-9\s]', ' ', texto)
     return " ".join(texto.split())
 
 def converter_valor_absoluto(valor):
+    """
+    Converte qualquer string de valor para float POSITIVO (ABSOLUTO).
+    Ignora sinais de menos, mais, D ou C.
+    """
     valor_str = str(valor).strip().upper()
+    
+    # Remove qualquer caractere que não seja número, vírgula ou ponto
+    # (Removemos D, C, -, +, R$, espaços)
     valor_limpo = re.sub(r'[^\d,.]', '', valor_str)
     
+    # Tratamento para milhar/decimal (Brasil vs EUA)
     if ',' in valor_limpo and '.' in valor_limpo:
+        # Ex: 1.000,00 -> 1000.00
         valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
     elif ',' in valor_limpo:
+        # Ex: 1000,00 -> 1000.00
         valor_limpo = valor_limpo.replace(',', '.')
     
     try:
         val_float = float(valor_limpo)
-        return abs(val_float) 
+        return abs(val_float) # Garante que é sempre positivo
     except:
         return 0.0
 
@@ -109,6 +119,7 @@ def processar_extrato(file):
         nome = file.name.lower()
         df = None
         
+        # Leitura Inteligente (CSV ou Excel)
         if nome.endswith('.csv') or nome.endswith('.txt'):
             try: df = pd.read_csv(file, sep=';', encoding='latin1', header=None, on_bad_lines='skip')
             except: 
@@ -119,45 +130,59 @@ def processar_extrato(file):
             if "Extrato" in xls.sheet_names: df = pd.read_excel(xls, sheet_name="Extrato", header=0)
             else: df = pd.read_excel(xls, header=0)
 
+        # Identificação de Colunas
         df.columns = [str(c).upper().strip() for c in df.columns]
         
         col_data = None
         col_valor = None
         col_desc = None
         
+        # Se tem cabeçalho
         if 'DATA' in df.columns and 'VALOR' in df.columns:
             col_data = 'DATA'
             col_valor = 'VALOR'
             col_desc = next((c for c in df.columns if 'HIST' in c or 'DESC' in c), None)
         else:
+            # Varredura Automática (para arquivos sem cabeçalho)
             for col in df.columns:
                 amostra = df[col].dropna().head(10).astype(str).tolist()
                 joined = " ".join(amostra)
+                
+                # Acha Data
                 if not col_data and re.search(r'\d{2}[/.]\d{2}[/.]\d{4}', joined):
                     col_data = col
                     continue
+                
+                # Acha Valor (numérico)
                 if not col_valor and re.search(r'\d+[.,]\d{2}', joined):
-                    if not re.search(r'\d{2}[/.]\d{2}[/.]\d{4}', joined):
+                    if not re.search(r'\d{2}[/.]\d{2}[/.]\d{4}', joined): # Não pode ser data
                          col_valor = col
                          continue
+                
+                # Acha Descrição
                 if not col_desc and len(joined) > 50 and not re.search(r'\d{2}[/.]\d{2}[/.]\d{4}', joined):
                     col_desc = col
 
         if not col_data or not col_valor:
-            st.error("Erro: Data ou Valor não identificados no Extrato.")
+            st.error("Não foi possível identificar Data e Valor no arquivo.")
             return None
 
+        # Padronização
         df = df.rename(columns={col_data: 'DATA', col_valor: 'VALOR'})
         if col_desc: df = df.rename(columns={col_desc: 'DESCRIÇÃO'})
         else: df['DESCRIÇÃO'] = "Sem Descrição"
 
         df["DATA"] = pd.to_datetime(df["DATA"].astype(str).str.replace('.', '/', regex=False), dayfirst=True, errors='coerce')
         df = df.dropna(subset=['DATA'])
+
+        # --- AQUI ESTÁ A MUDANÇA: Tudo vira absoluto ---
         df["VALOR"] = df["VALOR"].apply(converter_valor_absoluto)
+
         df["BANCO"] = "EXTRATO"
         df["MES_ANO"] = df["DATA"].dt.strftime('%m/%Y')
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
+        
         return df
 
     except Exception as e:
@@ -171,8 +196,10 @@ def processar_documentos(file):
         except: df = pd.read_excel(file)
         df.columns = [str(c).strip() for c in df.columns]
         
+        # Prioriza Valor Total
         col_alvo = "Valor Total"
         if col_alvo not in df.columns: col_alvo = "Valor Baixa" 
+        
         if col_alvo not in df.columns: return None
 
         if "Data Baixa" in df.columns:
@@ -180,8 +207,10 @@ def processar_documentos(file):
         else:
             df["DATA_REF"] = pd.NaT
 
+        # Conversão absoluta
         df["VALOR_REF"] = df[col_alvo].apply(converter_valor_absoluto)
-        df = df[df["VALOR_REF"] > 0.01] 
+        df = df[df["VALOR_REF"] > 0.01] # Remove zeros
+        
         df["DESC_REF"] = df.get("Nome", "") + " " + df.get("Número", "").astype(str)
         df["DESC_CLEAN"] = df.get("Nome", "").astype(str).apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
@@ -190,7 +219,7 @@ def processar_documentos(file):
         st.error(f"Erro Doc: {e}")
         return None
 
-# --- 3. ESTADO ---
+# --- 3. ESTADO (FILTROS FIXOS) ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
@@ -219,7 +248,7 @@ if file_docs: df_docs = processar_documentos(file_docs)
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     st.title("📊 Painel de Controle")
-    st.caption("Valores absolutos (ignora sinal negativo).")
+    st.caption("Todos os valores são exibidos em módulo absoluto (sem sinal negativo).")
     
     if df_extrato is not None:
         with st.container():
@@ -251,10 +280,13 @@ if pagina == "🔎 Busca Avançada":
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
 
         if not df_f.empty:
+            total_mov = df_f["VALOR"].sum()
+            
             st.markdown("###")
             k1, k2 = st.columns(2)
-            k1.metric("Registros", f"{len(df_f)}")
-            k2.metric("Total (Abs)", formatar_br(df_f["VALOR"].sum()))
+            k1.metric("Registros Encontrados", f"{len(df_f)}")
+            k2.metric("Movimentação Total (Absoluta)", formatar_br(total_mov))
+            
             st.dataframe(df_f[["DATA", "DESCRIÇÃO", "VALOR"]], use_container_width=True, hide_index=True)
             st.download_button("📥 BAIXAR EXCEL", to_excel(df_f), "busca.xlsx")
         else:
@@ -271,8 +303,8 @@ elif pagina == "🤝 Conciliação Automática":
     if df_extrato is not None and df_docs is not None:
         with st.expander("⚙️ Configuração", expanded=True):
             c1, c2 = st.columns(2)
-            similaridade = c1.slider("Similaridade (%)", 50, 100, 70)
-            c2.info("Regra 1: Valor Absoluto (±0.10). Regra 2: Palavras em Comum.")
+            similaridade = c1.slider("Rigor do Nome (%)", 50, 100, 70)
+            c2.info("Regra: Comparação de Valor Absoluto (± R$ 0,10).")
         
         if st.button("🚀 EXECUTAR"):
             matches = []
@@ -280,57 +312,40 @@ elif pagina == "🤝 Conciliação Automática":
             used_docs = set()
             l_banco = df_extrato.to_dict('records')
             l_docs = df_docs.to_dict('records')
-            bar = st.progress(0, text="Processando...")
+            bar = st.progress(0, text="Cruzando dados...")
             total = len(l_docs)
             
             for i, doc in enumerate(l_docs):
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # 1. Filtro de Valor (Absoluto, margem 0.10)
+                # Ambos já são absolutos
                 val_doc = doc['VALOR_REF']
                 candidatos = []
+                
                 for b in l_banco:
                     if b['ID_UNICO'] not in used_banco:
                         if abs(val_doc - b['VALOR']) <= 0.10:
                             candidatos.append(b)
-                
+
                 if not candidatos: continue
-
-                # 2. Filtro de Palavras Idênticas
-                # Cria sets de palavras (maiores que 2 letras para ignorar 'DE', 'E')
-                doc_words = set(w for w in doc['DESC_CLEAN'].split() if len(w) > 2)
                 
-                candidatos_com_palavra = []
-                for cand in candidatos:
-                    cand_words = set(w for w in cand['DESC_CLEAN'].split() if len(w) > 2)
-                    # Interseção: se houver palavras em comum
-                    if doc_words.intersection(cand_words):
-                        candidatos_com_palavra.append(cand)
-                
-                # Lógica de Decisão
                 melhor_match = None
-                score_final = ""
-
-                if candidatos_com_palavra:
-                    # Se tiver candidatos com palavra igual, escolhe o melhor dentre eles (fuzzy)
+                
+                # Desempate
+                if len(candidatos) == 1:
+                    melhor_match = candidatos[0]
+                    score_final = "Valor Único (100%)"
+                else:
                     maior_score = -1
-                    for cand in candidatos_com_palavra:
+                    for cand in candidatos:
                         score = fuzz.token_set_ratio(doc['DESC_CLEAN'], cand['DESC_CLEAN'])
                         if score > maior_score:
                             maior_score = score
                             melhor_match = cand
-                    score_final = f"Palavra Igual + Fuzzy ({maior_score}%)"
-                
-                else:
-                    # NENHUMA palavra bateu.
-                    # Se só existir UM valor compatível no banco inteiro, aceitamos (Valor Único)
-                    if len(candidatos) == 1:
-                        melhor_match = candidatos[0]
-                        score_final = "Valor Único (Sem texto comum)"
-                    else:
-                        # Vários valores iguais e nenhum texto bate -> Ambíguo, não concilia.
-                        melhor_match = None
+                    
+                    if maior_score < similaridade: melhor_match = None
+                    else: score_final = f"{maior_score}%"
 
                 if melhor_match:
                     matches.append({
