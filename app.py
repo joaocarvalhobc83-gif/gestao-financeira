@@ -76,7 +76,6 @@ def salvar_no_historico(df_atual):
     historico_antigo = carregar_historico_db()
     
     # Junta o antigo com o novo (atualizando se houver duplicado)
-    # Removemos do antigo os que estão no novo para atualizar
     ids_novos = set(conciliados["ID_HASH"])
     historico_mantido = historico_antigo[~historico_antigo["ID_HASH"].isin(ids_novos)]
     
@@ -86,8 +85,6 @@ def salvar_no_historico(df_atual):
 
 def gerar_hash_unico(row):
     """Cria uma identidade única para a linha baseada nos dados"""
-    # Junta Data + Valor + Descrição + Ocorrência (para lidar com duplicatas)
-    # A ocorrência já deve ter sido calculada antes
     texto = f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}"
     return hashlib.md5(texto.encode('utf-8')).hexdigest()
 
@@ -161,7 +158,6 @@ def processar_extrato_inicial(file):
         df["BANCO"] = df[col_banco].astype(str).str.upper() if col_banco else "PADRÃO"
         
         # --- GERAÇÃO DE CHAVE ÚNICA ROBUSTA ---
-        # Calcula ocorrência para diferenciar transações idênticas no mesmo dia
         df = df.sort_values(by=["DATA", "VALOR", "DESCRIÇÃO"])
         df['OCORRENCIA'] = df.groupby(['DATA', 'VALOR', 'DESCRIÇÃO', 'BANCO']).cumcount()
         df['ID_HASH'] = df.apply(gerar_hash_unico, axis=1)
@@ -175,12 +171,8 @@ def processar_extrato_inicial(file):
         historico = carregar_historico_db()
         
         if not historico.empty:
-            # Faz o merge para recuperar o status
             df = df.merge(historico, on="ID_HASH", how="left")
-            
-            # Limpeza e conversão após merge
             df["CONCILIADO"] = df["CONCILIADO"].fillna("False").astype(str)
-            # Converte string 'True'/'False' do CSV para booleano real
             df["CONCILIADO"] = df["CONCILIADO"].apply(lambda x: True if x.lower() == 'true' else False)
             df["DATA_CONCILIACAO"] = df["DATA_CONCILIACAO"].fillna(pd.NA)
         else:
@@ -211,16 +203,25 @@ def processar_documentos(file):
         df["VALOR_REF"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
         df["DESC_REF"] = df.get("Nome", "") + " " + df.get("Número", "").astype(str)
         df["DESC_CLEAN"] = df.get("Nome", "").astype(str).apply(limpar_descricao)
-        df["ID_UNICO"] = range(len(df)) # ID apenas para esta sessão
+        df["ID_UNICO"] = range(len(df))
         return df
     except: return None
 
-# --- 5. INICIALIZAÇÃO E STATE ---
+# --- 5. INICIALIZAÇÃO E STATE (COM CORREÇÃO DE ERRO) ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
+
 if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
+
+# >>>> FIX AUTOMÁTICO DE INTEGRIDADE <<<<
+# Se o cache estiver com versão antiga (sem ID_HASH), força recarga
+if st.session_state.dados_mestre is not None:
+    required_cols = ["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]
+    if not all(col in st.session_state.dados_mestre.columns for col in required_cols):
+        st.session_state.dados_mestre = None
+        st.rerun()
 
 def limpar_filtros_acao():
     st.session_state.filtro_mes = "Todos"
@@ -238,17 +239,16 @@ file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xls
 file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
 if file_extrato:
-    # Se ainda não carregou ou se o arquivo mudou, reprocessa E busca histórico
     if st.session_state.dados_mestre is None:
         st.session_state.dados_mestre = processar_extrato_inicial(file_extrato)
-        st.toast("Extrato carregado e histórico sincronizado!", icon="✅")
+        st.toast("Extrato e Histórico Carregados!", icon="✅")
 
 df_docs = None
 if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA (COM PERSISTÊNCIA REAL)
+# TELA 1: BUSCA AVANÇADA
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     st.title("📊 Painel de Controle")
@@ -325,19 +325,15 @@ if pagina == "🔎 Busca Avançada":
                     "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large", disabled=True),
                     "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", disabled=True),
                     "TIPO": st.column_config.TextColumn("Tipo", disabled=True),
-                    "ID_HASH": None # Esconde o ID Hash
+                    "ID_HASH": None
                 }
             )
             
-            # --- SINCRONIZAÇÃO E SALVAMENTO ---
             needs_rerun = False
             mudou_algo = False
-            
             for index, row in edited_df.iterrows():
                 id_hash = row['ID_HASH']
                 conciliado_novo = row['CONCILIADO']
-                
-                # Busca pelo ID Hash que é imutável
                 idx_master = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_HASH'] == id_hash].tolist()
                 
                 if idx_master:
@@ -350,14 +346,12 @@ if pagina == "🔎 Busca Avançada":
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
                         else:
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = None
-                        
                         needs_rerun = True
                         mudou_algo = True
 
             if mudou_algo:
-                # Salva no disco imediatamente
                 salvar_no_historico(st.session_state.dados_mestre)
-                st.toast("Alterações Salvas no Histórico!", icon="💾")
+                st.toast("Salvo no Histórico!", icon="💾")
 
             if needs_rerun: st.rerun()
 
@@ -403,7 +397,6 @@ elif pagina == "🤝 Conciliação Automática":
                 candidatos = []
                 val_doc = doc['VALOR_REF']
                 for b in l_banco:
-                    # Usa Hash para garantir unicidade
                     if b['ID_HASH'] in used_banco: continue
                     val_banco = abs(b['VALOR'])
                     if abs(val_doc - val_banco) <= 0.10:
