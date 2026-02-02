@@ -5,77 +5,20 @@ from datetime import datetime
 from io import BytesIO
 from rapidfuzz import process, fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO PREMIUM (SEM GRÁFICOS) ---
+# --- 1. CONFIGURAÇÃO E ESTILO PREMIUM ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
-    
-    /* Fundo Moderno Escuro */
-    .stApp { 
-        background-color: #0f172a; 
-        background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); 
-        font-family: 'Inter', sans-serif;
-    }
-
-    /* Cards de Métricas (Glassmorphism) */
-    div[data-testid="stMetric"] {
-        background: rgba(30, 41, 59, 0.4);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 20px;
-        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
-        transition: transform 0.2s ease;
-    }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-        border-color: #6366f1;
-        background: rgba(30, 41, 59, 0.6);
-    }
-    
-    /* Inputs Estilizados */
-    .stTextInput > div > div > input, .stSelectbox > div > div > div {
-        background-color: #1e293b;
-        color: white;
-        border-radius: 10px;
-        border: 1px solid #334155;
-    }
-
-    /* Botão de Download (Verde Destaque) */
-    div.stDownloadButton > button {
-        background: linear-gradient(90deg, #10b981 0%, #059669 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.8rem 1.5rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        width: 100%;
-        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
-        transition: all 0.3s ease;
-    }
-    div.stDownloadButton > button:hover {
-        transform: scale(1.02);
-        box-shadow: 0 8px 20px rgba(16, 185, 129, 0.5);
-    }
-
-    /* Botão de Ação Principal (Azul) */
-    div.stButton > button {
-        background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        font-weight: 600;
-    }
-    
-    /* Ajuste de Tabelas */
-    [data-testid="stDataFrame"] {
-        background-color: rgba(30, 41, 59, 0.3);
-        border-radius: 10px;
-        padding: 10px;
-    }
+    .stApp { background-color: #0f172a; background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); font-family: 'Inter', sans-serif; }
+    div[data-testid="stMetric"] { background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1); transition: transform 0.2s ease; }
+    div[data-testid="stMetric"]:hover { transform: translateY(-5px); border-color: #6366f1; background: rgba(30, 41, 59, 0.6); }
+    .stTextInput > div > div > input, .stSelectbox > div > div > div { background-color: #1e293b; color: white; border-radius: 10px; border: 1px solid #334155; }
+    div.stDownloadButton > button { background: linear-gradient(90deg, #10b981 0%, #059669 100%); color: white; border: none; border-radius: 8px; padding: 0.8rem 1.5rem; font-weight: 700; text-transform: uppercase; width: 100%; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); transition: all 0.3s ease; }
+    div.stDownloadButton > button:hover { transform: scale(1.02); box-shadow: 0 8px 20px rgba(16, 185, 129, 0.5); }
+    div.stButton > button { background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%); color: white; border: none; border-radius: 10px; font-weight: 600; }
+    [data-testid="stDataFrame"] { background-color: rgba(30, 41, 59, 0.3); border-radius: 10px; padding: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -107,7 +50,42 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 2. PROCESSAMENTO (COM COLUNA BANCO) ---
+# --- 2. PROCESSAMENTO (CORREÇÃO DE SINAL NEGATIVO) ---
+def converter_valor_correto(valor, linha_inteira=None):
+    """
+    Função robusta para detectar se é débito ou crédito.
+    Aceita '100,00-' como negativo.
+    """
+    valor_str = str(valor).strip().upper()
+    sinal = 1.0
+    
+    # 1. Verifica sinal no próprio valor (Ex: "100,00-" ou "-100,00")
+    if valor_str.endswith('-') or valor_str.startswith('-'):
+        sinal = -1.0
+        
+    # Limpa o valor para converter em float
+    valor_limpo = valor_str.replace('R$', '').replace(' ', '').replace('-', '')
+    # Remove ponto de milhar e troca virgula decimal por ponto
+    if ',' in valor_limpo:
+        valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+    else:
+        # Caso raro sem virgula
+        pass
+        
+    try:
+        val_float = float(valor_limpo) * sinal
+        
+        # 2. Verificação secundária se a linha inteira foi passada (Coluna D/C ou Tipo)
+        if linha_inteira is not None:
+            # Procura por indicativos de débito nas outras colunas da linha
+            texto_linha = str(linha_inteira.values).upper()
+            if "DÉBITO" in texto_linha or "'D'" in texto_linha or ";D;" in texto_linha:
+                if val_float > 0: val_float = val_float * -1
+                
+        return val_float
+    except:
+        return 0.0
+
 @st.cache_data
 def processar_extrato(file):
     try:
@@ -134,11 +112,14 @@ def processar_extrato(file):
         if not col_data or not col_valor: return None
         
         df["DATA"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
-        df["VALOR"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+        
+        # --- CORREÇÃO AQUI: Aplica a conversão linha a linha ---
+        # Passamos a linha inteira para verificar se tem coluna "D/C" ou similar
+        df["VALOR"] = df.apply(lambda row: converter_valor_correto(row[col_valor], row), axis=1)
+        
         col_desc = next((c for c in df.columns if 'DESC' in c or 'HIST' in c), None)
         df["DESCRIÇÃO"] = df[col_desc].astype(str).fillna("") if col_desc else ""
         
-        # Garante coluna BANCO
         col_banco = next((c for c in df.columns if 'BANCO' in c), None)
         df["BANCO"] = df[col_banco].astype(str).str.upper() if col_banco else "PADRÃO"
             
@@ -147,12 +128,12 @@ def processar_extrato(file):
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
         
-        if "TIPO" not in df.columns:
-            df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x > 0 else "DÉBITO")
+        # Recalcula o TIPO baseado no valor final já corrigido
+        df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
             
         return df
     except Exception as e:
-        st.error(f"Erro: {e}")
+        st.error(f"Erro ao processar arquivo: {e}")
         return None
 
 @st.cache_data
@@ -177,7 +158,7 @@ def processar_documentos(file):
 
 # --- 3. MENU E UPLOADS ---
 st.sidebar.title("Navegação")
-pagina = st.sidebar.radio("Módulo:", ["🔎 Busca Avançada (Tabela)", "🤝 Conciliação Automática"])
+pagina = st.sidebar.radio("Módulo:", ["🔎 Busca Avançada", "🤝 Conciliação Automática"])
 
 st.sidebar.markdown("---")
 st.sidebar.title("📁 Importação")
@@ -194,9 +175,9 @@ if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA (SEM GRÁFICOS)
+# TELA 1: BUSCA AVANÇADA
 # ==============================================================================
-if pagina == "🔎 Busca Avançada (Tabela)":
+if pagina == "🔎 Busca Avançada":
     
     st.title("📊 Painel de Controle")
     st.markdown("Filtre, pesquise e exporte dados do Extrato Bancário.")
@@ -243,7 +224,8 @@ if pagina == "🔎 Busca Avançada (Tabela)":
                     if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
-                    df_f = df_f[(df_f["VALOR"] - valor_busca).abs() <= 0.10]
+                    # Usa valor absoluto para buscar tanto Crédito quanto Débito
+                    df_f = df_f[(df_f["VALOR"].abs() - valor_busca).abs() <= 0.10]
                     st.toast(f"🎯 Valor Encontrado: R$ {valor_busca:,.2f} (± 0,10)", icon="✅")
                 except:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
@@ -254,6 +236,7 @@ if pagina == "🔎 Busca Avançada (Tabela)":
 
         # --- RESULTADOS ---
         if not df_f.empty:
+            # Cálculo de totais (Baseado na coluna VALOR já corrigida)
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
             
@@ -330,8 +313,13 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # Regra 1: Filtra por Valor
-                candidatos = [b for b in l_banco if b['ID_UNICO'] not in used_banco and abs(doc['VALOR_REF'] - b['VALOR']) <= 0.10]
+                # Regra 1: Filtra por Valor (COMPARA VALOR ABSOLUTO PARA EVITAR ERRO DE SINAL)
+                candidatos = [
+                    b for b in l_banco 
+                    if b['ID_UNICO'] not in used_banco 
+                    and abs(doc['VALOR_REF'] - abs(b['VALOR'])) <= 0.10
+                ]
+                
                 if not candidatos: continue
                 
                 # Regra 2: Melhor Texto
