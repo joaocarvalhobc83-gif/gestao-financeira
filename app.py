@@ -28,10 +28,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNÇÕES ---
 def formatar_br(valor):
     try: return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return "R$ 0,00"
+
+def formatar_data(dt):
+    try: return pd.to_datetime(dt).strftime("%d/%m/%Y")
+    except: return ""
 
 def formatar_visual_db(valor):
     try: return f"{float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -39,11 +43,11 @@ def formatar_visual_db(valor):
 
 def limpar_descricao(texto):
     texto = str(texto).upper()
-    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO"]
+    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA"]
     for termo in termos_inuteis:
         texto = texto.replace(termo, "")
-    texto = re.sub(r'[^A-Z\s]', '', texto)
-    return texto.strip()
+    texto = re.sub(r'[^A-Z0-9\s]', ' ', texto)
+    return " ".join(texto.split())
 
 @st.cache_data(show_spinner=False)
 def to_excel(df_to_download):
@@ -52,245 +56,245 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 2. LEITORES DE ARQUIVO (MODO RIGOROSO) ---
-
+# --- 2. PROCESSAMENTO DE ARQUIVOS ---
 @st.cache_data
-def processar_extrato_bancario(file):
-    """Lê estritamente a aba 'Extrato' do Excel"""
+def processar_extrato(file):
     try:
-        # Carrega o arquivo Excel (sem ler os dados ainda) para ver os nomes das abas
         xls = pd.ExcelFile(file, engine='openpyxl')
-        
-        # --- TRAVA DE SEGURANÇA: Verifica se existe a aba "Extrato" ---
         if "Extrato" not in xls.sheet_names:
-            st.error(f"❌ Erro: Não encontrei a aba chamada 'Extrato'.")
-            st.warning(f"Abas encontradas no arquivo: {xls.sheet_names}")
-            st.info("Dica: Renomeie a aba do seu Excel para 'Extrato' (primeira letra maiúscula).")
+            st.error("Aba 'Extrato' não encontrada no arquivo Excel.")
             return None
         
-        # Se passou, lê apenas a aba correta
         df = pd.read_excel(xls, sheet_name="Extrato", header=0)
-        
-        # Normaliza colunas para maiúsculo para evitar erro de 'Data' vs 'DATA'
         df.columns = [str(c).upper().strip() for c in df.columns]
         
-        # Mapa de correção de nomes de colunas (caso mude um pouco)
         mapa = {'DATA LANÇAMENTO': 'DATA', 'HISTÓRICO': 'DESCRIÇÃO', 'LANCAMENTO': 'DATA', 'VALOR (R$)': 'VALOR'}
         df = df.rename(columns=mapa)
         
-        # Validação de Colunas Obrigatórias
         col_data = next((c for c in df.columns if 'DATA' in c), None)
         col_valor = next((c for c in df.columns if 'VALOR' in c), None)
         
-        if not col_data or not col_valor:
-            st.error(f"Achei a aba 'Extrato', mas não identifiquei as colunas DATA e VALOR dentro dela.")
-            st.write("Colunas encontradas:", df.columns.tolist())
-            return None
-
-        # Tratamento de dados
-        df["DATA_REF"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
-        df["VALOR_REF"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+        if not col_data or not col_valor: return None
         
-        # Se tiver coluna Descrição, usa. Se não, cria vazia.
+        df["DATA"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
+        df["VALOR"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
         col_desc = next((c for c in df.columns if 'DESC' in c or 'HIST' in c), None)
-        df["DESC_REF"] = df[col_desc].astype(str).fillna("") if col_desc else "Sem Descrição"
+        df["DESCRIÇÃO"] = df[col_desc].astype(str).fillna("") if col_desc else ""
         
-        df["DESC_CLEAN"] = df["DESC_REF"].apply(limpar_descricao)
-        df["VALOR_VISUAL"] = df["VALOR_REF"].apply(formatar_visual_db)
-        df["ID_UNICO"] = range(len(df)) # ID para conciliação
+        # Colunas extras
+        df["MES_ANO"] = df["DATA"].dt.strftime('%m/%Y')
+        df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
+        df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
+        df["ID_UNICO"] = range(len(df))
         
+        # Cria coluna tipo baseada no sinal se não existir
+        if "TIPO" not in df.columns:
+            df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x > 0 else "DÉBITO")
+            
         return df
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
+        st.error(f"Erro: {e}")
         return None
 
 @st.cache_data
-def processar_documentos_sistema(file):
-    """Lê o arquivo de Documentos/Sistema Interno"""
+def processar_documentos(file):
     try:
-        try:
-            df = pd.read_csv(file, sep=',', encoding='utf-8')
-        except:
-            file.seek(0)
-            df = pd.read_excel(file)
-            
-        df.columns = [str(c).strip() for c in df.columns]
+        try: df = pd.read_csv(file, sep=',')
+        except: df = pd.read_excel(file)
         
+        df.columns = [str(c).strip() for c in df.columns]
         if "Data Baixa" not in df.columns or "Valor Baixa" not in df.columns:
-            st.warning("Arquivo de Documentos precisa ter colunas 'Data Baixa' e 'Valor Baixa'")
+            st.warning("Arquivo de documentos inválido (sem Data Baixa ou Valor Baixa).")
             return None
             
         df = df.dropna(subset=["Data Baixa"])
         df["DATA_REF"] = pd.to_datetime(df["Data Baixa"], errors='coerce')
         df["VALOR_REF"] = pd.to_numeric(df["Valor Baixa"], errors='coerce').fillna(0)
-        df["DESC_REF"] = df.get("Nome", "Documento") + " - " + df.get("Número", "").astype(str)
+        df["DESC_REF"] = df.get("Nome", "") + " " + df.get("Número", "").astype(str)
         df["DESC_CLEAN"] = df.get("Nome", "").astype(str).apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
-        
         return df
-    except Exception as e:
-        st.error(f"Erro documentos: {e}")
-        return None
+    except: return None
 
-# --- 3. BARRA LATERAL (UPLOADS) ---
-st.sidebar.title("📁 Importação de Dados")
+# --- 3. MENU LATERAL ---
+st.sidebar.title("Navegação")
+# AQUI ESTÁ A MÁGICA: O usuário escolhe qual tela quer ver
+pagina = st.sidebar.radio("Ir para:", ["📊 Painel & Busca", "🤝 Conciliação de Documentos"])
 
-st.sidebar.markdown("### 1. Extrato Bancário (.xlsm)")
-file_banco = st.sidebar.file_uploader("Carregue EXTRATOS GERAIS", type=["xlsx", "xlsm"], key="up1")
+st.sidebar.markdown("---")
+st.sidebar.title("📁 Arquivos")
 
-st.sidebar.markdown("### 2. Documentos Internos")
-file_docs = st.sidebar.file_uploader("Carregue o CSV do Sistema", type=["csv", "xlsx"], key="up2")
+# Upload Global (serve para as duas telas)
+file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xlsm"])
+file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
-df_banco = None
+df_extrato = None
 df_docs = None
 
-if file_banco:
-    df_banco = processar_extrato_bancario(file_banco)
-    if df_banco is not None:
-        st.sidebar.success(f"🏦 Extrato: {len(df_banco)} linhas (Aba: Extrato)")
-
+if file_extrato:
+    df_extrato = processar_extrato(file_extrato)
 if file_docs:
-    df_docs = processar_documentos_sistema(file_docs)
-    if df_docs is not None:
-        st.sidebar.success(f"📄 Sistema: {len(df_docs)} documentos")
+    df_docs = processar_documentos(file_docs)
 
-# --- 4. TELA PRINCIPAL ---
-
-if df_banco is not None:
-    tab1, tab2 = st.tabs(["📊 Visão Extrato", "🤝 Conciliação Automática"])
+# ==============================================================================
+# TELA 1: PAINEL & BUSCA (Seu código original restaurado)
+# ==============================================================================
+if pagina == "📊 Painel & Busca":
+    st.title("Gestão Financeira - Painel de Busca")
     
-    # --- ABA 1: VISÃO GERAL ---
-    with tab1:
+    if df_extrato is not None:
         # Filtros
-        df_f = df_banco.copy()
-        df_f["MES_ANO"] = df_f["DATA_REF"].dt.strftime('%m/%Y')
+        meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
+        sel_mes = st.selectbox("📅 Filtrar Mês:", meses)
         
-        col_f1, col_f2 = st.columns(2)
-        meses = ["Todos"] + sorted(df_f["MES_ANO"].unique().tolist(), reverse=True)
-        sel_mes = col_f1.selectbox("📅 Mês:", meses)
-        
+        df_f = df_extrato.copy()
         if sel_mes != "Todos":
             df_f = df_f[df_f["MES_ANO"] == sel_mes]
             
-        # KPI
-        ent = df_f[df_f["VALOR_REF"] > 0]["VALOR_REF"].sum()
-        sai = df_f[df_f["VALOR_REF"] < 0]["VALOR_REF"].sum()
+        st.markdown("---")
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Entradas", formatar_br(ent))
-        m2.metric("Saídas", formatar_br(sai))
-        m3.metric("Saldo", formatar_br(ent + sai))
-        
-        st.dataframe(df_f[["DATA_REF", "DESC_REF", "VALOR_REF"]], use_container_width=True)
-
-    # --- ABA 2: MOTOR DE CONCILIAÇÃO ---
-    with tab2:
-        if df_docs is None:
-            st.info("⚠️ Para conciliar, carregue também o arquivo de Documentos na barra lateral.")
-        else:
-            st.subheader("🔍 Identificação de Lançamentos")
-            st.markdown("Busca cruzada entre **Extrato Bancário** e **Documentos do Sistema**.")
+        # --- BUSCA AVANÇADA (Sua lógica de 0.10 centavos) ---
+        col_busca, _ = st.columns([3, 1])
+        with col_busca:
+            busca = st.text_input("🔍 Pesquisar no Extrato", placeholder="Digite valor (ex: 1000) ou nome...")
             
-            c_conf1, c_conf2 = st.columns(2)
-            dias_tol = c_conf1.slider("Tolerância de Data (dias)", 0, 5, 2)
+        if busca:
+            termo = busca.strip()
             
-            if st.button("🚀 Processar Conciliação"):
-                matches = []
-                l_banco = df_banco.to_dict('records')
-                l_docs = df_docs.to_dict('records')
-                
-                used_banco = set()
-                used_docs = set()
-                
-                progress_text = "Analise em andamento..."
-                my_bar = st.progress(0, text=progress_text)
-                
-                # 1. EXATO
-                for d in l_docs:
-                    if d['ID_UNICO'] in used_docs: continue
-                    for b in l_banco:
-                        if b['ID_UNICO'] in used_banco: continue
-                        
-                        # Match valor exato (com tolerância de float)
-                        if abs(d['VALOR_REF'] - b['VALOR_REF']) < 0.05: 
-                            if d['DATA_REF'] == b['DATA_REF']:
-                                matches.append({
-                                    "DATA": b['DATA_REF'],
-                                    "VALOR": b['VALOR_REF'],
-                                    "BANCO": b['DESC_REF'],
-                                    "SISTEMA": d['DESC_REF'],
-                                    "STATUS": "✅ EXATO"
-                                })
-                                used_banco.add(b['ID_UNICO'])
-                                used_docs.add(d['ID_UNICO'])
-                                break
-                
-                my_bar.progress(50, text="Verificando datas próximas...")
-
-                # 2. FLEXÍVEL (Data)
-                for d in l_docs:
-                    if d['ID_UNICO'] in used_docs: continue
-                    for b in l_banco:
-                        if b['ID_UNICO'] in used_banco: continue
-                        
-                        if abs(d['VALOR_REF'] - b['VALOR_REF']) < 0.05:
-                            diff_dias = abs((d['DATA_REF'] - b['DATA_REF']).days)
-                            if diff_dias <= dias_tol:
-                                matches.append({
-                                    "DATA": b['DATA_REF'],
-                                    "VALOR": b['VALOR_REF'],
-                                    "BANCO": b['DESC_REF'],
-                                    "SISTEMA": d['DESC_REF'],
-                                    "STATUS": f"⚠️ DATA ({diff_dias}d)"
-                                })
-                                used_banco.add(b['ID_UNICO'])
-                                used_docs.add(d['ID_UNICO'])
-                                break
-                
-                my_bar.progress(80, text="Verificando nomes similares...")
-
-                # 3. INTELIGENTE (Nome)
-                for d in l_docs:
-                    if d['ID_UNICO'] in used_docs: continue
-                    for b in l_banco:
-                        if b['ID_UNICO'] in used_banco: continue
-                        
-                        if abs(d['VALOR_REF'] - b['VALOR_REF']) < 0.05:
-                            ratio = fuzz.token_set_ratio(d['DESC_CLEAN'], b['DESC_CLEAN'])
-                            if ratio > 85:
-                                matches.append({
-                                    "DATA": b['DATA_REF'],
-                                    "VALOR": b['VALOR_REF'],
-                                    "BANCO": b['DESC_REF'],
-                                    "SISTEMA": d['DESC_REF'],
-                                    "STATUS": f"🔍 NOME ({ratio}%)"
-                                })
-                                used_banco.add(b['ID_UNICO'])
-                                used_docs.add(d['ID_UNICO'])
-                                break
-
-                my_bar.empty()
-                
-                # Exibição
-                df_match = pd.DataFrame(matches)
-                if not df_match.empty:
-                    st.success(f"{len(df_match)} itens conciliados!")
-                    st.dataframe(df_match, use_container_width=True)
+            # 1. Busca Visual (ex: 1000.)
+            if termo.endswith('.'):
+                if termo[:-1].replace('.', '').isdigit():
+                    df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
+                    st.success(f"👁️ Visual: Iniciados em **'{termo}'**")
                 else:
-                    st.warning("Nenhum match encontrado.")
-                
-                # Sobras
-                st.markdown("---")
-                col_sobra1, col_sobra2 = st.columns(2)
-                
-                sobras_banco = df_banco[~df_banco['ID_UNICO'].isin(used_banco)]
-                sobras_docs = df_docs[~df_docs['ID_UNICO'].isin(used_docs)]
-                
-                col_sobra1.error(f"Sobras Extrato ({len(sobras_banco)})")
-                col_sobra1.dataframe(sobras_banco[["DATA_REF", "DESC_REF", "VALOR_REF"]], use_container_width=True)
-                
-                col_sobra2.error(f"Sobras Sistema ({len(sobras_docs)})")
-                col_sobra2.dataframe(sobras_docs[["DATA_REF", "DESC_REF", "VALOR_REF"]], use_container_width=True)
+                    df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
+            
+            # 2. Busca Numérica (Tolerância 0.10)
+            elif any(char.isdigit() for char in termo):
+                try:
+                    limpo = termo.replace('R$', '').replace(' ', '')
+                    if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
+                    else: limpo = limpo.replace('.', '') 
+                    valor_busca = float(limpo)
+                    
+                    # A LÓGICA DE ARREDONDAMENTO QUE VOCÊ PEDIU
+                    df_f = df_f[(df_f["VALOR"] - valor_busca).abs() <= 0.10]
+                    st.success(f"🎯 Valor Flexível (±0,10): **R$ {valor_busca:,.2f}**")
+                except:
+                    df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
+            else:
+                df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
+        
+        # KPIs
+        ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
+        sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Registros", len(df_f))
+        m2.metric("Entradas", formatar_br(ent))
+        m3.metric("Saídas", formatar_br(sai))
+        m4.metric("Saldo", formatar_br(ent + sai))
+        
+        # Tabela Formatada para a Tela 1
+        df_show = df_f.copy()
+        df_show["DATA_FMT"] = df_show["DATA"].apply(formatar_data)
+        df_show["VALOR_FMT"] = df_show["VALOR"].apply(formatar_br)
+        
+        st.dataframe(df_show[["DATA_FMT", "DESCRIÇÃO", "VALOR_FMT", "TIPO"]], use_container_width=True, hide_index=True)
+        
+    else:
+        st.info("👈 Por favor, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
-else:
-    st.info("👈 Por favor, carregue o arquivo 'EXTRATOS GERAIS.xlsm' (garanta que a aba se chama 'Extrato').")
+# ==============================================================================
+# TELA 2: CONCILIAÇÃO (A tela nova que você pediu)
+# ==============================================================================
+elif pagina == "🤝 Conciliação de Documentos":
+    st.title("Conciliação: Extrato vs Documentos")
+    st.markdown("Cruzamento inteligente usando **Valor (±0,10)** e **Semelhança de Nome** (Ignorando Data).")
+    
+    if df_extrato is not None and df_docs is not None:
+        
+        similaridade = st.slider("Nível de Certeza do Nome (%)", 50, 100, 70)
+        
+        if st.button("🚀 Processar Conciliação"):
+            matches = []
+            used_banco = set()
+            used_docs = set()
+            
+            l_banco = df_extrato.to_dict('records')
+            l_docs = df_docs.to_dict('records')
+            
+            bar = st.progress(0, text="Analisando...")
+            total = len(l_docs)
+            
+            for i, doc in enumerate(l_docs):
+                if i % 10 == 0: bar.progress(int((i/total)*100))
+                
+                if doc['ID_UNICO'] in used_docs: continue
+                
+                # 1. Filtra candidatos pelo VALOR (Regra dos 10 centavos)
+                candidatos = [
+                    b for b in l_banco 
+                    if b['ID_UNICO'] not in used_banco 
+                    and abs(doc['VALOR_REF'] - b['VALOR']) <= 0.10
+                ]
+                
+                if not candidatos: continue
+                
+                # 2. Procura o melhor NOME entre os candidatos de valor igual
+                melhor_match = None
+                maior_score = 0
+                
+                for cand in candidatos:
+                    score = fuzz.token_set_ratio(doc['DESC_CLEAN'], cand['DESC_CLEAN'])
+                    if score > maior_score:
+                        maior_score = score
+                        melhor_match = cand
+                
+                # 3. Se o nome for parecido o suficiente, casa
+                if maior_score >= similaridade:
+                    matches.append({
+                        "Data Extrato": formatar_data(melhor_match['DATA']),
+                        "Descrição Extrato": melhor_match['DESCRIÇÃO'],
+                        "Valor Extrato": formatar_br(melhor_match['VALOR']),
+                        "Descrição Doc": doc['DESC_REF'],
+                        "Valor Doc": formatar_br(doc['VALOR_REF']),
+                        "Match (%)": f"{maior_score}%"
+                    })
+                    used_banco.add(melhor_match['ID_UNICO'])
+                    used_docs.add(doc['ID_UNICO'])
+            
+            bar.empty()
+            
+            # --- EXIBIÇÃO DOS RESULTADOS ---
+            df_results = pd.DataFrame(matches)
+            
+            if not df_results.empty:
+                st.success(f"✅ {len(df_results)} Conciliações Encontradas!")
+                st.dataframe(df_results, use_container_width=True)
+                
+                # Botão baixar
+                st.download_button("⬇️ Baixar Resultado", to_excel(df_results), "conciliacao.xlsx")
+            else:
+                st.warning("Nenhuma conciliação encontrada com esses parâmetros.")
+            
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            
+            # Sobras formatadas
+            sobras_b = df_extrato[~df_extrato['ID_UNICO'].isin(used_banco)].copy()
+            sobras_b["Data Fmt"] = sobras_b["DATA"].apply(formatar_data)
+            sobras_b["Valor Fmt"] = sobras_b["VALOR"].apply(formatar_br)
+            
+            c1.error(f"Não encontrado no Extrato ({len(sobras_b)})")
+            c1.dataframe(sobras_b[["Data Fmt", "DESCRIÇÃO", "Valor Fmt"]], use_container_width=True)
+            
+            sobras_d = df_docs[~df_docs['ID_UNICO'].isin(used_docs)].copy()
+            sobras_d["Data Fmt"] = sobras_d["DATA_REF"].apply(formatar_data)
+            sobras_d["Valor Fmt"] = sobras_d["VALOR_REF"].apply(formatar_br)
+            
+            c2.error(f"Não encontrado no Doc ({len(sobras_d)})")
+            c2.dataframe(sobras_d[["Data Fmt", "DESC_REF", "Valor Fmt"]], use_container_width=True)
+
+    else:
+        st.info("Para usar a conciliação, carregue o Extrato E o arquivo de Documentos na barra lateral.")
