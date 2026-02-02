@@ -5,21 +5,20 @@ from datetime import datetime
 from io import BytesIO
 from rapidfuzz import process, fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO PREMIUM (VISUAL RESTAURADO) ---
+# --- 1. CONFIGURAÇÃO E ESTILO PREMIUM ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
     
-    /* Fundo Moderno Escuro */
     .stApp { 
         background-color: #0f172a; 
         background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); 
         font-family: 'Inter', sans-serif;
     }
 
-    /* Cards de Métricas (Glassmorphism) */
+    /* Cards e Métricas */
     div[data-testid="stMetric"] {
         background: rgba(30, 41, 59, 0.4);
         backdrop-filter: blur(12px);
@@ -27,15 +26,9 @@ st.markdown("""
         border-radius: 16px;
         padding: 20px;
         box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
-        transition: transform 0.2s ease;
-    }
-    div[data-testid="stMetric"]:hover {
-        transform: translateY(-5px);
-        border-color: #6366f1;
-        background: rgba(30, 41, 59, 0.6);
     }
     
-    /* Inputs Estilizados */
+    /* Inputs */
     .stTextInput > div > div > input, .stSelectbox > div > div > div {
         background-color: #1e293b;
         color: white;
@@ -43,7 +36,7 @@ st.markdown("""
         border: 1px solid #334155;
     }
 
-    /* Botão de Download (Verde Destaque) */
+    /* Botão Download */
     div.stDownloadButton > button {
         background: linear-gradient(90deg, #10b981 0%, #059669 100%);
         color: white;
@@ -53,32 +46,9 @@ st.markdown("""
         font-weight: 700;
         text-transform: uppercase;
         width: 100%;
-        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
-        transition: all 0.3s ease;
-    }
-    div.stDownloadButton > button:hover {
-        transform: scale(1.02);
-        box-shadow: 0 8px 20px rgba(16, 185, 129, 0.5);
     }
 
-    /* Botões Normais (Azul) */
-    div.stButton > button {
-        background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        font-weight: 600;
-        width: 100%;
-    }
-    
-    /* Botão Limpar (Estilo Secundário) */
-    button[kind="secondary"] {
-        background: transparent !important;
-        border: 1px solid #ef4444 !important;
-        color: #ef4444 !important;
-    }
-    
-    /* Ajuste de Tabelas */
+    /* Tabela Editável */
     [data-testid="stDataFrame"] {
         background-color: rgba(30, 41, 59, 0.3);
         border-radius: 10px;
@@ -111,7 +81,6 @@ def limpar_descricao(texto):
 def converter_valor_correto(valor, linha_inteira=None):
     valor_str = str(valor).strip().upper()
     sinal = 1.0
-    # Verifica se tem sinal no final (100-) ou inicio (-100)
     if valor_str.endswith('-') or valor_str.startswith('-'):
         sinal = -1.0
     valor_limpo = valor_str.replace('R$', '').replace(' ', '').replace('-', '')
@@ -119,7 +88,6 @@ def converter_valor_correto(valor, linha_inteira=None):
         valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
     try:
         val_float = float(valor_limpo) * sinal
-        # Checagem extra na linha
         if linha_inteira is not None:
             texto_linha = str(linha_inteira.values).upper()
             if "DÉBITO" in texto_linha or ";D;" in texto_linha:
@@ -136,8 +104,8 @@ def to_excel(df_to_download):
     return output.getvalue()
 
 # --- 2. PROCESSAMENTO ---
-@st.cache_data
-def processar_extrato(file):
+# Removemos o cache aqui para permitir edição dinâmica no session_state
+def processar_extrato_inicial(file):
     try:
         xls = pd.ExcelFile(file, engine='openpyxl')
         if "Extrato" not in xls.sheet_names:
@@ -155,7 +123,6 @@ def processar_extrato(file):
         if not col_data or not col_valor: return None
         
         df["DATA"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
-        # Correção de valor
         df["VALOR"] = df.apply(lambda row: converter_valor_correto(row[col_valor], row), axis=1)
         
         col_desc = next((c for c in df.columns if 'DESC' in c or 'HIST' in c), None)
@@ -167,6 +134,11 @@ def processar_extrato(file):
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
+        
+        # --- NOVAS COLUNAS PARA O CHECK ---
+        df["CONCILIADO"] = False
+        df["DATA_CONCILIACAO"] = None
+        
         return df
     except Exception as e:
         st.error(f"Erro: {e}")
@@ -188,12 +160,14 @@ def processar_documentos(file):
         return df
     except: return None
 
-# --- 3. INICIALIZAÇÃO DE ESTADO (MEMÓRIA FIXA) ---
-# Isso garante que os valores não sumam ao trocar de aba
+# --- 3. INICIALIZAÇÃO DE ESTADO ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
+
+# STATE PARA DADOS MESTRE (Persistência dos Checks)
+if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
 
 def limpar_filtros_acao():
     st.session_state.filtro_mes = "Todos"
@@ -201,7 +175,7 @@ def limpar_filtros_acao():
     st.session_state.filtro_tipo = "Todos"
     st.session_state.filtro_texto = ""
 
-# --- 4. BARRA LATERAL (Apenas Navegação e Uploads) ---
+# --- 4. BARRA LATERAL ---
 st.sidebar.title("Navegação")
 pagina = st.sidebar.radio("Módulo:", ["🔎 Busca Avançada", "🤝 Conciliação Automática"])
 
@@ -211,65 +185,63 @@ st.sidebar.title("📁 Importação")
 file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xlsm"])
 file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
-df_extrato = None
-df_docs = None
-
+# Lógica de Carregamento Único
 if file_extrato:
-    df_extrato = processar_extrato(file_extrato)
+    # Se ainda não carregou ou se mudou o arquivo
+    if st.session_state.dados_mestre is None:
+        st.session_state.dados_mestre = processar_extrato_inicial(file_extrato)
+        st.toast("Extrato Carregado com Sucesso!", icon="✅")
+    
+df_docs = None
 if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA (LAYOUT RESTAURADO COM MEMÓRIA)
+# TELA 1: BUSCA AVANÇADA COM CHECKBOX E DATA
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     
     st.title("📊 Painel de Controle")
-    st.markdown("Filtre, pesquise e exporte dados do Extrato Bancário.")
+    st.markdown("Filtre, marque como conciliado e exporte.")
     
-    if df_extrato is not None:
+    # Trabalhamos sempre com uma cópia ou referência do Session State
+    if st.session_state.dados_mestre is not None:
+        df_master = st.session_state.dados_mestre # Referência direta
         
-        # --- FILTROS NO PAINEL PRINCIPAL (LAYOUT ORIGINAL) ---
+        # --- FILTROS ---
         with st.container():
-            # Container de filtros visualmente agradável
             with st.expander("🌪️ Filtros Avançados", expanded=True):
                 c1, c2, c3 = st.columns(3)
                 
-                meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
-                # O uso de 'key' aqui conecta o visual à memória fixa
+                meses = ["Todos"] + sorted(df_master["MES_ANO"].unique().tolist(), reverse=True)
                 sel_mes = c1.selectbox("📅 Mês de Referência:", meses, key="filtro_mes")
                 
-                bancos = ["Todos"] + sorted(df_extrato["BANCO"].unique().tolist())
+                bancos = ["Todos"] + sorted(df_master["BANCO"].unique().tolist())
                 sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
 
                 tipos = ["Todos", "CRÉDITO", "DÉBITO"]
                 sel_tipo = c3.selectbox("🔄 Tipo de Movimento:", tipos, key="filtro_tipo")
                 
-                # Botão de Limpar
-                if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao):
-                    pass # A ação é feita no callback
+                if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao): pass
         
-        # Aplica Filtros baseados na memória
-        df_f = df_extrato.copy()
+        # Aplica Filtros (Criando uma visualização filtrada)
+        df_f = df_master.copy() # Cópia para filtragem
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
         if st.session_state.filtro_banco != "Todos": df_f = df_f[df_f["BANCO"] == st.session_state.filtro_banco]
         if st.session_state.filtro_tipo != "Todos": df_f = df_f[df_f["TIPO"] == st.session_state.filtro_tipo]
 
         st.markdown("###")
         
-        # --- BUSCA DE TEXTO (MEMÓRIA FIXA) ---
-        busca = st.text_input("🔎 Pesquisa Rápida (Valor ou Nome)", key="filtro_texto", placeholder="Ex: 1000 ou Nome...")
+        # --- BUSCA TEXTO ---
+        busca = st.text_input("🔎 Pesquisa Rápida (Valor ou Nome)", key="filtro_texto", placeholder="Ex: 483,71 ou Nome...")
 
         if busca:
             termo = busca.strip()
-            # Visual (1000.)
             if termo.endswith('.'):
                 if termo[:-1].replace('.', '').isdigit():
                     df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
-                    st.toast(f"👁️ Filtro: {termo}", icon="✅")
                 else:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-            # Numérico (±0.10)
             elif any(char.isdigit() for char in termo):
                 try:
                     limpo = termo.replace('R$', '').replace(' ', '')
@@ -277,20 +249,16 @@ if pagina == "🔎 Busca Avançada":
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
                     df_f = df_f[(df_f["VALOR"].abs() - valor_busca).abs() <= 0.10]
-                    st.toast(f"🎯 Valor: R$ {valor_busca:,.2f}", icon="✅")
                 except:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-            # Texto
             else:
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-                st.toast(f"🔤 Texto: {termo}", icon="✅")
 
-        # --- RESULTADOS ---
+        # --- RESULTADOS E EDIÇÃO ---
         if not df_f.empty:
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
             
-            st.markdown("###")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Itens Filtrados", f"{len(df_f)}")
             k2.metric("Entradas", formatar_br(ent), delta="Crédito")
@@ -298,33 +266,90 @@ if pagina == "🔎 Busca Avançada":
             k4.metric("Saldo Seleção", formatar_br(ent + sai))
             
             st.markdown("---")
-
-            st.subheader("📋 Detalhamento dos Lançamentos")
-            df_show = df_f.copy()
+            st.subheader("📋 Detalhamento (Edite a coluna 'Conciliado')")
+            
+            # Prepara Dataframe para o Editor
+            # Reordenamos colunas para colocar o CHECK no começo
+            cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_UNICO"]
+            df_show = df_f[cols_order].copy()
             df_show["DATA"] = df_show["DATA"].dt.date
             
-            st.dataframe(
-                df_show[["DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO"]],
+            # --- O EDITOR DE DADOS (Aqui acontece a mágica) ---
+            edited_df = st.data_editor(
+                df_show,
                 use_container_width=True,
                 hide_index=True,
                 height=500,
+                key="editor_principal",
                 column_config={
-                    "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-                    "BANCO": st.column_config.TextColumn("Instituição", width="medium"),
-                    "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large"),
-                    "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
-                    "TIPO": st.column_config.TextColumn("Tipo", width="small")
+                    "CONCILIADO": st.column_config.CheckboxColumn(
+                        "Conciliado?",
+                        help="Marque para conciliar",
+                        default=False
+                    ),
+                    "DATA_CONCILIACAO": st.column_config.TextColumn(
+                        "Data Visto",
+                        help="Preenchido Automaticamente",
+                        disabled=True # Usuário não edita a data, o sistema preenche
+                    ),
+                    "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY", disabled=True),
+                    "BANCO": st.column_config.TextColumn("Instituição", disabled=True),
+                    "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large", disabled=True),
+                    "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", disabled=True),
+                    "TIPO": st.column_config.TextColumn("Tipo", disabled=True),
+                    "ID_UNICO": None # Oculta o ID
                 }
             )
             
+            # --- SINCRONIZAÇÃO E ATUALIZAÇÃO DA DATA ---
+            # Comparamos o editado com o original da sessão para atualizar
+            # Como st.data_editor retorna o estado atual, verificamos o que mudou
+            
+            # Iteramos sobre as linhas editadas para atualizar o MESTRE
+            needs_rerun = False
+            for index, row in edited_df.iterrows():
+                id_unico = row['ID_UNICO']
+                conciliado_novo = row['CONCILIADO']
+                
+                # Busca a linha correspondente no DF Mestre da Sessão
+                idx_master = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_UNICO'] == id_unico].tolist()
+                
+                if idx_master:
+                    idx = idx_master[0]
+                    conciliado_antigo = st.session_state.dados_mestre.at[idx, 'CONCILIADO']
+                    
+                    # Se houve mudança no Checkbox
+                    if conciliado_novo != conciliado_antigo:
+                        st.session_state.dados_mestre.at[idx, 'CONCILIADO'] = conciliado_novo
+                        
+                        if conciliado_novo:
+                            # Se marcou, coloca a data de agora
+                            st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                        else:
+                            # Se desmarcou, limpa a data
+                            st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = None
+                        
+                        needs_rerun = True
+
+            if needs_rerun:
+                st.rerun()
+
+            # --- BOTÃO DE EXPORTAR (BAIXA O MESTRE COMPLETO ATUALIZADO) ---
             st.write("")
             col_exp, _ = st.columns([1, 2])
             with col_exp:
-                dados_excel = to_excel(df_f)
+                # Filtramos o mestre atual para baixar apenas o que está na tela ou o mestre todo?
+                # Geralmente o usuário quer baixar o que filtrou ou tudo. Vamos baixar o que está FILTRADO mas com os dados atualizados.
+                
+                # Recarrega df_f atualizado do mestre
+                ids_na_tela = df_f['ID_UNICO'].tolist()
+                df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_UNICO'].isin(ids_na_tela)].copy()
+                
+                dados_excel = to_excel(df_export)
                 st.download_button(
-                    label="📥 BAIXAR TABELA FILTRADA (EXCEL)",
+                    label="📥 BAIXAR DADOS (COM CONCILIAÇÃO)",
                     data=dados_excel,
-                    file_name="resultado_busca.xlsx",
+                    file_name="resultado_conciliado.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
         else:
@@ -333,24 +358,27 @@ if pagina == "🔎 Busca Avançada":
         st.info("👈 Para começar, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
-# TELA 2: CONCILIAÇÃO
+# TELA 2: CONCILIAÇÃO AUTOMÁTICA
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
-    st.markdown("Cruzamento entre **Extrato** e **Documentos** ignorando datas, focado em Valor e Texto.")
+    st.markdown("Cruzamento entre **Extrato** e **Documentos** ignorando datas.")
     
-    if df_extrato is not None and df_docs is not None:
+    # Usa o Mestre aqui também
+    if st.session_state.dados_mestre is not None and df_docs is not None:
         
         with st.expander("⚙️ Configuração do Robô", expanded=True):
             c1, c2 = st.columns(2)
             similaridade = c1.slider("Rigor do Nome (%)", 50, 100, 70)
-            c2.info("Regras Ativas:\n1. Valor Exato (Margem ± R$ 0,10).\n2. Texto Similar (Ignora Datas).")
+            c2.info("Regras Ativas:\n1. Valor: Margem de -10 a +10 centavos.\n2. Data: Ignorada.")
         
         if st.button("🚀 EXECUTAR CONCILIAÇÃO"):
             matches = []
             used_banco = set()
             used_docs = set()
-            l_banco = df_extrato.to_dict('records')
+            
+            # Pega dados do mestre
+            l_banco = st.session_state.dados_mestre.to_dict('records')
             l_docs = df_docs.to_dict('records')
             
             bar = st.progress(0, text="Processando...")
@@ -360,16 +388,16 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # Regra 1: Filtra por Valor (COMPARA VALOR ABSOLUTO PARA EVITAR ERRO DE SINAL)
-                candidatos = [
-                    b for b in l_banco 
-                    if b['ID_UNICO'] not in used_banco 
-                    and abs(doc['VALOR_REF'] - abs(b['VALOR'])) <= 0.10
-                ]
+                candidatos = []
+                for b in l_banco:
+                    if b['ID_UNICO'] in used_banco: continue
+                    
+                    diff = round(doc['VALOR_REF'] - abs(b['VALOR']), 2)
+                    if -0.10 <= diff <= 0.10:
+                        candidatos.append(b)
                 
                 if not candidatos: continue
                 
-                # Regra 2: Melhor Texto
                 melhor_match = None
                 maior_score = 0
                 for cand in candidatos:
@@ -386,6 +414,7 @@ elif pagina == "🤝 Conciliação Automática":
                         "Valor Extrato": formatar_br(melhor_match['VALOR']),
                         "Descrição Doc": doc['DESC_REF'],
                         "Valor Doc": formatar_br(doc['VALOR_REF']),
+                        "Diferença": f"{round(doc['VALOR_REF'] - abs(melhor_match['VALOR']), 2):.2f}",
                         "Match Score": f"{maior_score}%"
                     })
                     used_banco.add(melhor_match['ID_UNICO'])
@@ -400,7 +429,6 @@ elif pagina == "🤝 Conciliação Automática":
                 st.success(f"✅ {len(df_results)} Pares Encontrados!")
                 st.dataframe(df_results, use_container_width=True)
                 
-                # --- BOTÃO DE EXPORTAR ---
                 st.write("")
                 col_exp_conc, _ = st.columns([1, 2])
                 with col_exp_conc:
@@ -414,11 +442,11 @@ elif pagina == "🤝 Conciliação Automática":
             else:
                 st.warning("Nenhuma conciliação encontrada.")
             
-            # Tabelas de Pendências
             st.markdown("---")
             c_sobra1, c_sobra2 = st.columns(2)
             
-            sobra_b = df_extrato[~df_extrato['ID_UNICO'].isin(used_banco)].copy()
+            # Pendências Extrato (Baseado no Mestre)
+            sobra_b = st.session_state.dados_mestre[~st.session_state.dados_mestre['ID_UNICO'].isin(used_banco)].copy()
             sobra_b["Data Fmt"] = sobra_b["DATA"].apply(formatar_data)
             sobra_b["Valor Fmt"] = sobra_b["VALOR"].apply(formatar_br)
             c_sobra1.error(f"Pendências no Extrato ({len(sobra_b)})")
