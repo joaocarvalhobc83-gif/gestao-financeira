@@ -46,6 +46,13 @@ st.markdown("""
         text-transform: uppercase;
         width: 100%;
     }
+    
+    /* Botão de Perigo (Zerar Base) */
+    div.stButton > button[kind="primary"] {
+        background-color: #ef4444;
+        border: 1px solid #b91c1c;
+        color: white;
+    }
 
     [data-testid="stDataFrame"] {
         background-color: rgba(30, 41, 59, 0.3);
@@ -59,7 +66,7 @@ st.markdown("""
 DB_EXTRATO_HIST = "historico_conciliacoes_db.csv"
 DB_BENNER = "db_benner_master.csv"
 
-# --- FUNÇÕES DE CARGA/SALVAMENTO EXTRATO ---
+# --- FUNÇÕES EXTRATO ---
 def carregar_historico_extrato():
     if os.path.exists(DB_EXTRATO_HIST):
         try: return pd.read_csv(DB_EXTRATO_HIST, dtype=str)
@@ -74,7 +81,7 @@ def salvar_historico_extrato(df_atual):
     novo_db = pd.concat([historico_mantido, conciliados], ignore_index=True)
     novo_db.to_csv(DB_EXTRATO_HIST, index=False)
 
-# --- FUNÇÕES DE CARGA/SALVAMENTO BENNER ---
+# --- FUNÇÕES BENNER (COM ZERAR BASE) ---
 def carregar_db_benner():
     colunas_padrao = [
         'Número', 'Identificador do pagamento', 'Nome', 'CNPJ/CPF', 
@@ -94,33 +101,41 @@ def carregar_db_benner():
             return pd.DataFrame(columns=colunas_padrao)
     return pd.DataFrame(columns=colunas_padrao)
 
+def zerar_base_benner():
+    """Apaga o arquivo físico e reseta a sessão"""
+    if os.path.exists(DB_BENNER):
+        os.remove(DB_BENNER)
+    st.session_state.db_benner = pd.DataFrame(columns=[
+        'Número', 'Identificador do pagamento', 'Nome', 'CNPJ/CPF', 
+        'Tipo do Documento', 'Data de Emissão', 'Data de Vencimento', 
+        'Data Baixa', 'Valor Baixa', 'Valor Total', 'Data de cancelamento',
+        'ID_BENNER', 'STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA'
+    ])
+    st.toast("Base de Dados Benner apagada com sucesso!", icon="🗑️")
+
 def atualizar_db_benner(novo_df):
     """
-    Atualiza o banco de dados. 
-    REGRA DE OURO: Se 'Data Baixa' existe no arquivo novo, marca como Conciliado automaticamente.
+    Atualiza o banco de dados Benner.
+    REGRA: Data Baixa preenchida = Conciliado.
     """
     db_atual = carregar_db_benner()
     
     novo_df['ID_BENNER'] = novo_df['Número'].astype(str)
     
-    # --- REGRA DE DATA BAIXA (AUTO-CONCILIAÇÃO) ---
-    # Converte para data para verificar se não é NaT (Not a Time)
+    # --- REGRA AUTO-CONCILIAÇÃO PELA DATA DE BAIXA ---
     novo_df['Data Baixa Temp'] = pd.to_datetime(novo_df['Data Baixa'], errors='coerce')
     
-    # Define padrão como Pendente
     novo_df['STATUS_CONCILIACAO'] = "Pendente"
     novo_df['DATA_CONCILIACAO_SISTEMA'] = None
     
-    # Se tem data de baixa válida, marca como Conciliado
+    # Se tem Data Baixa, marca como Conciliado
     mask_baixado = novo_df['Data Baixa Temp'].notna()
     novo_df.loc[mask_baixado, 'STATUS_CONCILIACAO'] = 'Conciliado'
     novo_df.loc[mask_baixado, 'DATA_CONCILIACAO_SISTEMA'] = datetime.now().strftime("%d/%m/%Y %H:%M")
     
-    # Remove coluna temporária
     novo_df = novo_df.drop(columns=['Data Baixa Temp'])
     
-    # --- MERGE INTELIGENTE ---
-    # Precisamos manter o histórico de quem foi conciliado MANUALMENTE pelo robô antes
+    # --- MERGE COM HISTÓRICO (PRESERVA CONCILIAÇÃO MANUAL) ---
     ids_novos = set(novo_df['ID_BENNER'])
     
     if not db_atual.empty:
@@ -128,9 +143,7 @@ def atualizar_db_benner(novo_df):
         
         for idx, row in novo_df.iterrows():
             id_b = row['ID_BENNER']
-            
-            # Se o arquivo diz que está Pendente (sem data de baixa), mas no banco já estava Conciliado (pelo robô)
-            # Mantemos o status Conciliado do banco para não perder trabalho.
+            # Se o arquivo diz Pendente, mas o DB diz Conciliado (feito pelo robô), mantém o DB
             if row['STATUS_CONCILIACAO'] == 'Pendente' and id_b in status_map:
                 if status_map[id_b]['STATUS_CONCILIACAO'] == 'Conciliado':
                     novo_df.at[idx, 'STATUS_CONCILIACAO'] = 'Conciliado'
@@ -327,10 +340,7 @@ if file_docs:
     if "ultimo_arq_benner" not in st.session_state or st.session_state.ultimo_arq_benner != file_docs.name:
         st.session_state.db_benner = processar_upload_benner(file_docs)
         st.session_state.ultimo_arq_benner = file_docs.name
-        
-        # Conta quantos foram auto-conciliados
-        conc_count = len(st.session_state.db_benner[st.session_state.db_benner['STATUS_CONCILIACAO'] == 'Conciliado'])
-        st.toast(f"Base Benner Atualizada! {conc_count} itens já marcados como conciliados (via Baixa).", icon="💾")
+        st.toast("Base Benner Atualizada! (Auto-Conciliação de Baixas aplicada)", icon="💾")
 
 # ==============================================================================
 # TELA 1: BUSCA AVANÇADA (EXTRATO)
@@ -480,6 +490,15 @@ elif pagina == "📁 Gestão Benner (Documentos)":
     st.title("📁 Base de Dados Benner")
     st.markdown("Gestão de todos os documentos carregados no sistema (Histórico Acumulado).")
     
+    # --- BOTÃO ZERAR BASE ---
+    with st.expander("⚠️ Zona de Perigo (Limpar Dados)", expanded=False):
+        st.warning("Atenção: Isso apagará todo o histórico de documentos do Benner importados.")
+        if st.button("🗑️ ZERAR BASE DE DADOS (Começar do Zero)", type="primary"):
+            zerar_base_benner()
+            st.rerun()
+            
+    st.markdown("---")
+    
     df_benner = st.session_state.db_benner
     
     if not df_benner.empty:
@@ -535,8 +554,8 @@ elif pagina == "🤝 Conciliação Automática":
     
     df_benner = st.session_state.db_benner
     
-    # Prepara dados do Benner para o Robô (Apenas Pendentes)
     if not df_benner.empty:
+        # Pega apenas Pendentes
         df_docs_proc = df_benner[df_benner['STATUS_CONCILIACAO'] == 'Pendente'].copy()
         
         col_valor = "Valor Total" if "Valor Total" in df_docs_proc.columns else "Valor Baixa"
