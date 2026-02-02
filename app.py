@@ -68,26 +68,41 @@ def processar_extrato(file):
         df = pd.read_excel(xls, sheet_name="Extrato", header=0)
         df.columns = [str(c).upper().strip() for c in df.columns]
         
-        mapa = {'DATA LANÇAMENTO': 'DATA', 'HISTÓRICO': 'DESCRIÇÃO', 'LANCAMENTO': 'DATA', 'VALOR (R$)': 'VALOR'}
+        # Mapa de colunas
+        mapa = {
+            'DATA LANÇAMENTO': 'DATA', 'LANCAMENTO': 'DATA', 
+            'HISTÓRICO': 'DESCRIÇÃO', 'HISTORICO': 'DESCRIÇÃO',
+            'VALOR (R$)': 'VALOR', 
+            'INSTITUICAO': 'BANCO', 'INSTITUIÇÃO': 'BANCO' # Garante leitura do Banco
+        }
         df = df.rename(columns=mapa)
         
+        # Validação
         col_data = next((c for c in df.columns if 'DATA' in c), None)
         col_valor = next((c for c in df.columns if 'VALOR' in c), None)
         
         if not col_data or not col_valor: return None
         
+        # Tratamento de Colunas
         df["DATA"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
         df["VALOR"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+        
         col_desc = next((c for c in df.columns if 'DESC' in c or 'HIST' in c), None)
         df["DESCRIÇÃO"] = df[col_desc].astype(str).fillna("") if col_desc else ""
         
+        # --- AQUI: Tenta achar ou criar a coluna BANCO ---
+        col_banco = next((c for c in df.columns if 'BANCO' in c), None)
+        if col_banco:
+            df["BANCO"] = df[col_banco].astype(str).str.upper()
+        else:
+            df["BANCO"] = "PADRÃO" # Caso não tenha coluna banco, coloca um padrão
+            
         # Colunas extras
         df["MES_ANO"] = df["DATA"].dt.strftime('%m/%Y')
         df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
         
-        # Cria coluna tipo baseada no sinal se não existir
         if "TIPO" not in df.columns:
             df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x > 0 else "DÉBITO")
             
@@ -118,13 +133,11 @@ def processar_documentos(file):
 
 # --- 3. MENU LATERAL ---
 st.sidebar.title("Navegação")
-# AQUI ESTÁ A MÁGICA: O usuário escolhe qual tela quer ver
 pagina = st.sidebar.radio("Ir para:", ["📊 Painel & Busca", "🤝 Conciliação de Documentos"])
 
 st.sidebar.markdown("---")
 st.sidebar.title("📁 Arquivos")
 
-# Upload Global (serve para as duas telas)
 file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xlsm"])
 file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
@@ -137,47 +150,50 @@ if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: PAINEL & BUSCA (Seu código original restaurado)
+# TELA 1: PAINEL & BUSCA
 # ==============================================================================
 if pagina == "📊 Painel & Busca":
     st.title("Gestão Financeira - Painel de Busca")
     
     if df_extrato is not None:
-        # Filtros
-        meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
-        sel_mes = st.selectbox("📅 Filtrar Mês:", meses)
+        # --- FILTROS ---
+        c_filt1, c_filt2 = st.columns(2)
         
+        # Filtro de Mês
+        meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
+        sel_mes = c_filt1.selectbox("📅 Filtrar Mês:", meses)
+        
+        # Filtro de Banco (NOVO)
+        bancos = ["Todos"] + sorted(df_extrato["BANCO"].unique().tolist())
+        sel_banco = c_filt2.selectbox("🏦 Filtrar Banco:", bancos)
+        
+        # Aplica Filtros
         df_f = df_extrato.copy()
-        if sel_mes != "Todos":
-            df_f = df_f[df_f["MES_ANO"] == sel_mes]
+        if sel_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == sel_mes]
+        if sel_banco != "Todos": df_f = df_f[df_f["BANCO"] == sel_banco]
             
         st.markdown("---")
         
-        # --- BUSCA AVANÇADA (Sua lógica de 0.10 centavos) ---
+        # --- BUSCA AVANÇADA ---
         col_busca, _ = st.columns([3, 1])
         with col_busca:
             busca = st.text_input("🔍 Pesquisar no Extrato", placeholder="Digite valor (ex: 1000) ou nome...")
             
         if busca:
             termo = busca.strip()
-            
-            # 1. Busca Visual (ex: 1000.)
+            # Lógica de Busca Mantida
             if termo.endswith('.'):
                 if termo[:-1].replace('.', '').isdigit():
                     df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
                     st.success(f"👁️ Visual: Iniciados em **'{termo}'**")
                 else:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-            
-            # 2. Busca Numérica (Tolerância 0.10)
             elif any(char.isdigit() for char in termo):
                 try:
                     limpo = termo.replace('R$', '').replace(' ', '')
                     if ',' in limpo: limpo = limpo.replace('.', '').replace(',', '.') 
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
-                    
-                    # A LÓGICA DE ARREDONDAMENTO QUE VOCÊ PEDIU
                     df_f = df_f[(df_f["VALOR"] - valor_busca).abs() <= 0.10]
                     st.success(f"🎯 Valor Flexível (±0,10): **R$ {valor_busca:,.2f}**")
                 except:
@@ -195,18 +211,23 @@ if pagina == "📊 Painel & Busca":
         m3.metric("Saídas", formatar_br(sai))
         m4.metric("Saldo", formatar_br(ent + sai))
         
-        # Tabela Formatada para a Tela 1
+        # Tabela Formatada (COM COLUNA BANCO)
         df_show = df_f.copy()
         df_show["DATA_FMT"] = df_show["DATA"].apply(formatar_data)
         df_show["VALOR_FMT"] = df_show["VALOR"].apply(formatar_br)
         
-        st.dataframe(df_show[["DATA_FMT", "DESCRIÇÃO", "VALOR_FMT", "TIPO"]], use_container_width=True, hide_index=True)
+        # Exibe a coluna BANCO
+        st.dataframe(
+            df_show[["DATA_FMT", "BANCO", "DESCRIÇÃO", "VALOR_FMT", "TIPO"]], 
+            use_container_width=True, 
+            hide_index=True
+        )
         
     else:
         st.info("👈 Por favor, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
-# TELA 2: CONCILIAÇÃO (A tela nova que você pediu)
+# TELA 2: CONCILIAÇÃO
 # ==============================================================================
 elif pagina == "🤝 Conciliação de Documentos":
     st.title("Conciliação: Extrato vs Documentos")
@@ -232,7 +253,6 @@ elif pagina == "🤝 Conciliação de Documentos":
                 
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # 1. Filtra candidatos pelo VALOR (Regra dos 10 centavos)
                 candidatos = [
                     b for b in l_banco 
                     if b['ID_UNICO'] not in used_banco 
@@ -241,7 +261,6 @@ elif pagina == "🤝 Conciliação de Documentos":
                 
                 if not candidatos: continue
                 
-                # 2. Procura o melhor NOME entre os candidatos de valor igual
                 melhor_match = None
                 maior_score = 0
                 
@@ -251,10 +270,10 @@ elif pagina == "🤝 Conciliação de Documentos":
                         maior_score = score
                         melhor_match = cand
                 
-                # 3. Se o nome for parecido o suficiente, casa
                 if maior_score >= similaridade:
                     matches.append({
                         "Data Extrato": formatar_data(melhor_match['DATA']),
+                        "Banco": melhor_match['BANCO'],
                         "Descrição Extrato": melhor_match['DESCRIÇÃO'],
                         "Valor Extrato": formatar_br(melhor_match['VALOR']),
                         "Descrição Doc": doc['DESC_REF'],
@@ -266,14 +285,11 @@ elif pagina == "🤝 Conciliação de Documentos":
             
             bar.empty()
             
-            # --- EXIBIÇÃO DOS RESULTADOS ---
             df_results = pd.DataFrame(matches)
             
             if not df_results.empty:
                 st.success(f"✅ {len(df_results)} Conciliações Encontradas!")
                 st.dataframe(df_results, use_container_width=True)
-                
-                # Botão baixar
                 st.download_button("⬇️ Baixar Resultado", to_excel(df_results), "conciliacao.xlsx")
             else:
                 st.warning("Nenhuma conciliação encontrada com esses parâmetros.")
@@ -281,13 +297,12 @@ elif pagina == "🤝 Conciliação de Documentos":
             st.markdown("---")
             c1, c2 = st.columns(2)
             
-            # Sobras formatadas
             sobras_b = df_extrato[~df_extrato['ID_UNICO'].isin(used_banco)].copy()
             sobras_b["Data Fmt"] = sobras_b["DATA"].apply(formatar_data)
             sobras_b["Valor Fmt"] = sobras_b["VALOR"].apply(formatar_br)
             
             c1.error(f"Não encontrado no Extrato ({len(sobras_b)})")
-            c1.dataframe(sobras_b[["Data Fmt", "DESCRIÇÃO", "Valor Fmt"]], use_container_width=True)
+            c1.dataframe(sobras_b[["Data Fmt", "BANCO", "DESCRIÇÃO", "Valor Fmt"]], use_container_width=True)
             
             sobras_d = df_docs[~df_docs['ID_UNICO'].isin(used_docs)].copy()
             sobras_d["Data Fmt"] = sobras_d["DATA_REF"].apply(formatar_data)
