@@ -193,7 +193,7 @@ if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA (COM EXPORTAÇÃO CORRIGIDA SIM/NÃO)
+# TELA 1: BUSCA AVANÇADA
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     
@@ -261,7 +261,7 @@ if pagina == "🔎 Busca Avançada":
             k4.metric("Saldo Seleção", formatar_br(ent + sai))
             
             st.markdown("---")
-            st.subheader("📋 Detalhamento (Marque a coluna 'Conciliado')")
+            st.subheader("📋 Detalhamento (Marque na coluna 'Conciliado')")
             
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_UNICO"]
             df_show = df_f[cols_order].copy()
@@ -318,16 +318,15 @@ if pagina == "🔎 Busca Avançada":
             if needs_rerun:
                 st.rerun()
 
-            # --- BOTÃO DE EXPORTAR (CORREÇÃO AQUI) ---
+            # --- BOTÃO DE EXPORTAR ---
             st.write("")
             col_exp, _ = st.columns([1, 2])
             with col_exp:
                 ids_na_tela = df_f['ID_UNICO'].tolist()
                 df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_UNICO'].isin(ids_na_tela)].copy()
                 
-                # --- [CORREÇÃO] Transforma True/False em Sim/Não para o Excel ---
+                # --- Correção: Transforma True/False em Sim/Não para o Excel ---
                 df_export["CONCILIADO"] = df_export["CONCILIADO"].apply(lambda x: "Sim" if x else "Não")
-                # ----------------------------------------------------------------
                 
                 dados_excel = to_excel(df_export)
                 st.download_button(
@@ -342,7 +341,7 @@ if pagina == "🔎 Busca Avançada":
         st.info("👈 Para começar, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
-# TELA 2: CONCILIAÇÃO AUTOMÁTICA
+# TELA 2: CONCILIAÇÃO AUTOMÁTICA (REGRA DE VALOR IGUAL À BUSCA)
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
@@ -353,7 +352,7 @@ elif pagina == "🤝 Conciliação Automática":
         with st.expander("⚙️ Configuração do Robô", expanded=True):
             c1, c2 = st.columns(2)
             similaridade = c1.slider("Rigor do Nome (%)", 50, 100, 70)
-            c2.info("Regras Ativas:\n1. Valor: Margem de -10 a +10 centavos.\n2. Data: Ignorada.")
+            c2.info("Regras Ativas:\n1. Valor: Margem de -10 a +10 centavos (Regra Busca Avançada).\n2. Data: Ignorada.")
         
         if st.button("🚀 EXECUTAR CONCILIAÇÃO"):
             matches = []
@@ -374,8 +373,13 @@ elif pagina == "🤝 Conciliação Automática":
                 for b in l_banco:
                     if b['ID_UNICO'] in used_banco: continue
                     
-                    diff = round(doc['VALOR_REF'] - abs(b['VALOR']), 2)
-                    if -0.10 <= diff <= 0.10:
+                    # --- APLICAÇÃO DA MESMA REGRA DA BUSCA AVANÇADA ---
+                    # Regra: abs(Valor Doc - Valor Abs Banco) <= 0.10
+                    # Isso garante que se a diferença estiver entre -0.10 e 0.10 ela passa
+                    val_doc = doc['VALOR_REF']
+                    val_banco = abs(b['VALOR'])
+                    
+                    if abs(val_doc - val_banco) <= 0.10:
                         candidatos.append(b)
                 
                 if not candidatos: continue
@@ -441,4 +445,3 @@ elif pagina == "🤝 Conciliação Automática":
 
     else:
         st.info("Carregue Extrato e Documentos na barra lateral.")
-
