@@ -5,23 +5,65 @@ from datetime import datetime
 from io import BytesIO
 from rapidfuzz import process, fuzz
 
-# --- 1. CONFIGURAÇÃO E ESTILO (VISUAL MANTIDO) ---
+# --- 1. CONFIGURAÇÃO E ESTILO (VISUAL INTACTO) ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap');
-    .stApp { background-color: #0f172a; background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); font-family: 'Inter', sans-serif; }
-    div[data-testid="stMetric"] { background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1); }
-    .stTextInput > div > div > input, .stSelectbox > div > div > div { background-color: #1e293b; color: white; border-radius: 10px; border: 1px solid #334155; }
-    div.stDownloadButton > button { background: linear-gradient(90deg, #10b981 0%, #059669 100%); color: white; border: none; border-radius: 8px; padding: 0.8rem 1.5rem; font-weight: 700; text-transform: uppercase; width: 100%; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); }
-    div.stButton > button { background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%); color: white; border: none; border-radius: 10px; font-weight: 600; width: 100%; }
-    button[kind="secondary"] { background: transparent !important; border: 1px solid #ef4444 !important; color: #ef4444 !important; }
-    [data-testid="stDataFrame"] { background-color: rgba(30, 41, 59, 0.3); border-radius: 10px; padding: 10px; }
+    
+    .stApp { 
+        background-color: #0f172a; 
+        background-image: radial-gradient(circle at 10% 20%, #1e293b 0%, #0f172a 80%); 
+        font-family: 'Inter', sans-serif;
+    }
+    div[data-testid="stMetric"] {
+        background: rgba(30, 41, 59, 0.4);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    }
+    .stTextInput > div > div > input, .stSelectbox > div > div > div {
+        background-color: #1e293b;
+        color: white;
+        border-radius: 10px;
+        border: 1px solid #334155;
+    }
+    div.stDownloadButton > button {
+        background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.8rem 1.5rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        width: 100%;
+        box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+    }
+    div.stButton > button {
+        background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        font-weight: 600;
+        width: 100%;
+    }
+    button[kind="secondary"] {
+        background: transparent !important;
+        border: 1px solid #ef4444 !important;
+        color: #ef4444 !important;
+    }
+    [data-testid="stDataFrame"] {
+        background-color: rgba(30, 41, 59, 0.3);
+        border-radius: 10px;
+        padding: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES ---
+# --- FUNÇÕES AUXILIARES ---
 def formatar_br(valor):
     try: return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return "R$ 0,00"
@@ -35,23 +77,19 @@ def formatar_visual_db(valor):
     except: return ""
 
 def limpar_descricao(texto):
-    # Função para limpar texto e facilitar a comparação de palavras exatas
     texto = str(texto).upper()
-    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB"]
+    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB", "ELET"]
     for termo in termos_inuteis:
         texto = texto.replace(termo, "")
-    # Mantém apenas letras e números, remove pontuação
     texto = re.sub(r'[^A-Z0-9\s]', ' ', texto)
     return " ".join(texto.split())
 
 def converter_valor_correto(valor, linha_inteira=None):
     valor_str = str(valor).strip().upper()
     sinal = 1.0
-    if valor_str.endswith('-') or valor_str.startswith('-'):
-        sinal = -1.0
+    if valor_str.endswith('-') or valor_str.startswith('-'): sinal = -1.0
     valor_limpo = valor_str.replace('R$', '').replace(' ', '').replace('-', '')
-    if ',' in valor_limpo:
-        valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
+    if ',' in valor_limpo: valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
     try:
         val_float = float(valor_limpo) * sinal
         if linha_inteira is not None:
@@ -59,8 +97,7 @@ def converter_valor_correto(valor, linha_inteira=None):
             if "DÉBITO" in texto_linha or ";D;" in texto_linha:
                 if val_float > 0: val_float = val_float * -1
         return val_float
-    except:
-        return 0.0
+    except: return 0.0
 
 @st.cache_data(show_spinner=False)
 def to_excel(df_to_download):
@@ -69,7 +106,7 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 2. PROCESSAMENTO ---
+# --- 2. PROCESSAMENTO (EXTRATO) ---
 @st.cache_data
 def processar_extrato(file):
     try:
@@ -97,26 +134,66 @@ def processar_extrato(file):
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         return df
     except Exception as e:
-        st.error(f"Erro: {e}")
+        st.error(f"Erro no Extrato: {e}")
         return None
 
+# --- 2.1 PROCESSAMENTO (DOCUMENTOS - NOVA LÓGICA DE VALOR) ---
 @st.cache_data
 def processar_documentos(file):
     try:
         try: df = pd.read_csv(file, sep=',')
         except: df = pd.read_excel(file)
         df.columns = [str(c).strip() for c in df.columns]
-        if "Data Baixa" not in df.columns or "Valor Baixa" not in df.columns: return None
-        df = df.dropna(subset=["Data Baixa"])
-        df["DATA_REF"] = pd.to_datetime(df["Data Baixa"], errors='coerce')
-        df["VALOR_REF"] = pd.to_numeric(df["Valor Baixa"], errors='coerce').fillna(0)
+        
+        # Identifica colunas de valor
+        col_baixa = next((c for c in df.columns if "Valor Baixa" in c), None)
+        col_total = next((c for c in df.columns if "Valor Total" in c), None)
+
+        if not col_baixa and not col_total: return None
+
+        # Tratamento de Data
+        if "Data Baixa" in df.columns:
+            df["DATA_REF"] = pd.to_datetime(df["Data Baixa"], errors='coerce')
+        else:
+            df["DATA_REF"] = pd.NaT
+
+        # --- LÓGICA DE PRIORIDADE DE VALOR ---
+        def obter_melhor_valor(row):
+            v_baixa = 0.0
+            v_total = 0.0
+            
+            # Tenta ler Baixa
+            if col_baixa and pd.notna(row[col_baixa]):
+                val_limpo = str(row[col_baixa]).replace('R$', '').replace('.', '').replace(',', '.')
+                # Remove traços isolados (ex: "-")
+                if val_limpo.strip() in ['-', '', 'nan']: val_limpo = '0'
+                try: v_baixa = float(val_limpo)
+                except: v_baixa = 0.0
+            
+            # Tenta ler Total
+            if col_total and pd.notna(row[col_total]):
+                val_limpo = str(row[col_total]).replace('R$', '').replace('.', '').replace(',', '.')
+                if val_limpo.strip() in ['-', '', 'nan']: val_limpo = '0'
+                try: v_total = float(val_limpo)
+                except: v_total = 0.0
+                
+            # Se Baixa > 0 usa Baixa, senão usa Total
+            return v_baixa if abs(v_baixa) > 0 else v_total
+
+        df["VALOR_REF"] = df.apply(obter_melhor_valor, axis=1)
+        
+        # Filtra apenas o que tem valor > 0
+        df = df[df["VALOR_REF"].abs() > 0.01]
+        
         df["DESC_REF"] = df.get("Nome", "") + " " + df.get("Número", "").astype(str)
         df["DESC_CLEAN"] = df.get("Nome", "").astype(str).apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
         return df
-    except: return None
+    except Exception as e:
+        st.error(f"Erro no Documento: {e}")
+        return None
 
-# --- 3. INICIALIZAÇÃO DE ESTADO ---
+# --- 3. GESTÃO DE ESTADO (PERSISTÊNCIA) ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
@@ -141,6 +218,11 @@ df_docs = None
 if file_extrato: df_extrato = processar_extrato(file_extrato)
 if file_docs: df_docs = processar_documentos(file_docs)
 
+# --- FILTROS PERSISTENTES (NAO RESETAM SOZINHOS) ---
+if df_extrato is not None:
+    # Apenas leitura das opções, sem aplicar filtro visual ainda
+    pass
+
 # ==============================================================================
 # TELA 1: BUSCA AVANÇADA
 # ==============================================================================
@@ -152,12 +234,16 @@ if pagina == "🔎 Busca Avançada":
         with st.container():
             with st.expander("🌪️ Filtros Avançados", expanded=True):
                 c1, c2, c3 = st.columns(3)
+                
                 meses = ["Todos"] + sorted(df_extrato["MES_ANO"].unique().tolist(), reverse=True)
                 sel_mes = c1.selectbox("📅 Mês de Referência:", meses, key="filtro_mes")
+                
                 bancos = ["Todos"] + sorted(df_extrato["BANCO"].unique().tolist())
                 sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
+                
                 tipos = ["Todos", "CRÉDITO", "DÉBITO"]
                 sel_tipo = c3.selectbox("🔄 Tipo de Movimento:", tipos, key="filtro_tipo")
+                
                 if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao): pass
         
         df_f = df_extrato.copy()
@@ -173,7 +259,6 @@ if pagina == "🔎 Busca Avançada":
             if termo.endswith('.'):
                 if termo[:-1].replace('.', '').isdigit():
                     df_f = df_f[df_f["VALOR_VISUAL"].str.startswith(termo)]
-                    st.toast(f"👁️ Filtro: {termo}", icon="✅")
                 else:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
             elif any(char.isdigit() for char in termo):
@@ -183,49 +268,44 @@ if pagina == "🔎 Busca Avançada":
                     else: limpo = limpo.replace('.', '') 
                     valor_busca = float(limpo)
                     df_f = df_f[(df_f["VALOR"].abs() - valor_busca).abs() <= 0.10]
-                    st.toast(f"🎯 Valor: R$ {valor_busca:,.2f}", icon="✅")
                 except:
                     df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
             else:
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
-                st.toast(f"🔤 Texto: {termo}", icon="✅")
 
         if not df_f.empty:
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
             st.markdown("###")
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Itens Filtrados", f"{len(df_f)}")
-            k2.metric("Entradas", formatar_br(ent), delta="Crédito")
-            k3.metric("Saídas", formatar_br(sai), delta="-Débito", delta_color="inverse")
-            k4.metric("Saldo Seleção", formatar_br(ent + sai))
+            k1.metric("Registros", f"{len(df_f)}")
+            k2.metric("Créditos", formatar_br(ent), delta="Entradas")
+            k3.metric("Débitos", formatar_br(sai), delta="-Saídas", delta_color="inverse")
+            k4.metric("Saldo", formatar_br(ent + sai))
             st.markdown("---")
-            st.subheader("📋 Detalhamento dos Lançamentos")
+            st.subheader("📋 Detalhamento")
             df_show = df_f.copy()
             df_show["DATA"] = df_show["DATA"].dt.date
-            st.dataframe(df_show[["DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO"]], use_container_width=True, hide_index=True, height=500, column_config={"DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), "BANCO": st.column_config.TextColumn("Instituição", width="medium"), "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large"), "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"), "TIPO": st.column_config.TextColumn("Tipo", width="small")})
-            st.write("")
+            st.dataframe(df_show[["DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO"]], use_container_width=True, hide_index=True, height=500, column_config={"DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), "VALOR": st.column_config.NumberColumn("Valor", format="R$ %.2f")})
             col_exp, _ = st.columns([1, 2])
             with col_exp:
-                dados_excel = to_excel(df_f)
-                st.download_button(label="📥 BAIXAR TABELA FILTRADA (EXCEL)", data=dados_excel, file_name="resultado_busca.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("📥 BAIXAR TABELA (EXCEL)", to_excel(df_f), "resultado_busca.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("🔍 Nenhum dado encontrado com os filtros atuais.")
+            st.warning("🔍 Nenhum dado encontrado.")
     else:
-        st.info("👈 Para começar, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
+        st.info("👈 Carregue 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
 # TELA 2: CONCILIAÇÃO
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
-    st.markdown("Cruzamento entre **Extrato** e **Documentos** priorizando o valor e validando pela descrição.")
     
     if df_extrato is not None and df_docs is not None:
-        with st.expander("⚙️ Configuração do Robô", expanded=True):
+        with st.expander("⚙️ Configuração", expanded=True):
             c1, c2 = st.columns(2)
-            similaridade = c1.slider("Rigor da Descrição (%)", 50, 100, 65)
-            c2.info("Lógica: 1º Valor Igual (± 1 centavo) -> 2º Verifica palavras da descrição.")
+            similaridade = c1.slider("Rigor do Nome (%)", 50, 100, 70)
+            c2.info("Regra de Ouro: Valor exato (± R$ 0,10) tem prioridade total.")
         
         if st.button("🚀 EXECUTAR CONCILIAÇÃO"):
             matches = []
@@ -240,50 +320,44 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # --- PASSO 1: BUSCAR TODOS OS CANDIDATOS COM VALOR IGUAL (Margem de segurança minúscula) ---
-                # Usamos 0.02 para garantir que problemas de float não atrapalhem, mas é praticamente exato.
-                candidatos = [
-                    b for b in l_banco 
-                    if b['ID_UNICO'] not in used_banco 
-                    and abs(doc['VALOR_REF'] - abs(b['VALOR'])) <= 0.05
-                ]
+                # BUSCA CANDIDATOS POR VALOR (Margem 0.10)
+                # IMPORTANTE: Comparação de float usando round para evitar erro de dizima
+                val_doc = round(abs(doc['VALOR_REF']), 2)
                 
-                if not candidatos: continue # Se não achou valor, pula
+                candidatos = []
+                for b in l_banco:
+                    if b['ID_UNICO'] not in used_banco:
+                        val_ext = round(abs(b['VALOR']), 2)
+                        # Verifica diferença absoluta
+                        if abs(val_doc - val_ext) <= 0.10:
+                            candidatos.append(b)
+
+                if not candidatos: continue
                 
-                # --- PASSO 2: DESEMPATE PELA DESCRIÇÃO ---
                 melhor_match = None
-                maior_score = -1
                 
-                for cand in candidatos:
-                    # token_set_ratio é ótimo para achar "alguma palavra igual" mesmo fora de ordem
-                    # Ex: "PAGTO JOAO SILVA" vs "JOAO DA SILVA" dá um score alto
-                    score = fuzz.token_set_ratio(doc['DESC_CLEAN'], cand['DESC_CLEAN'])
-                    
-                    if score > maior_score:
-                        maior_score = score
-                        melhor_match = cand
-                
-                # --- PASSO 3: VALIDAÇÃO ---
-                # Se só tem um candidato de valor, aceita se o score for razoável (evita falsos positivos bizarros)
-                # Se tem vários, o 'melhor_match' já pegou o melhor texto.
-                
-                # Se o score for muito baixo (ex: < 40), significa que o valor bateu, mas o texto não tem NADA a ver.
-                # Nesse caso, melhor não conciliar automaticamente para garantir exatidão.
-                # Mas se só tiver 1 candidato com valor exato, as vezes queremos aceitar.
-                # Vou usar a 'similaridade' do slider como corte.
-                
-                match_confirmado = False
-                
+                # --- LÓGICA DE VALOR ÚNICO ---
+                # Se só existe UM valor compatível no extrato, assume que é ele!
+                # (Mesmo que o nome não bata, pois muitas vezes o banco usa sigla)
                 if len(candidatos) == 1:
-                    # Se só tem um valor igual, somos um pouco mais flexíveis, mas ainda exigimos um mínimo de texto
-                    if maior_score >= (similaridade - 15): 
-                        match_confirmado = True
+                    melhor_match = candidatos[0]
+                    score_final = "Valor Único (100%)"
                 else:
-                    # Se tem vários valores iguais, exigimos rigor no texto para saber qual é o certo
-                    if maior_score >= similaridade:
-                        match_confirmado = True
-                
-                if match_confirmado and melhor_match:
+                    # Se tem mais de um valor igual, desempatamos pelo Nome
+                    maior_score = -1
+                    for cand in candidatos:
+                        score = fuzz.token_set_ratio(doc['DESC_CLEAN'], cand['DESC_CLEAN'])
+                        if score > maior_score:
+                            maior_score = score
+                            melhor_match = cand
+                    
+                    # Só aceita o desempate se tiver alguma semelhança mínima
+                    if maior_score < similaridade:
+                        melhor_match = None
+                    else:
+                        score_final = f"{maior_score}%"
+
+                if melhor_match:
                     matches.append({
                         "Data Extrato": formatar_data(melhor_match['DATA']),
                         "Banco": melhor_match['BANCO'],
@@ -291,7 +365,7 @@ elif pagina == "🤝 Conciliação Automática":
                         "Valor Extrato": formatar_br(melhor_match['VALOR']),
                         "Descrição Doc": doc['DESC_REF'],
                         "Valor Doc": formatar_br(doc['VALOR_REF']),
-                        "Score": f"{maior_score}%"
+                        "Score": score_final
                     })
                     used_banco.add(melhor_match['ID_UNICO'])
                     used_docs.add(doc['ID_UNICO'])
@@ -301,27 +375,24 @@ elif pagina == "🤝 Conciliação Automática":
             
             df_results = pd.DataFrame(matches)
             if not df_results.empty:
-                st.success(f"✅ {len(df_results)} Conciliações Exatas Encontradas!")
+                st.success(f"✅ {len(df_results)} Conciliados!")
                 st.dataframe(df_results, use_container_width=True)
-                col_exp_conc, _ = st.columns([1, 2])
-                with col_exp_conc:
-                    dados_conc = to_excel(df_results)
-                    st.download_button("📥 BAIXAR CONCILIAÇÃO (EXCEL)", dados_conc, "conciliacao.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button("📥 BAIXAR RESULTADO", to_excel(df_results), "conciliacao.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
-                st.warning("Nenhuma conciliação encontrada com os critérios de valor exato e descrição.")
+                st.warning("Nenhuma conciliação encontrada.")
             
             st.markdown("---")
             c1, c2 = st.columns(2)
             sobra_b = df_extrato[~df_extrato['ID_UNICO'].isin(used_banco)].copy()
-            sobra_b["Data Fmt"] = sobra_b["DATA"].apply(formatar_data)
-            sobra_b["Valor Fmt"] = sobra_b["VALOR"].apply(formatar_br)
-            c1.error(f"Pendências no Extrato ({len(sobra_b)})")
-            c1.dataframe(sobra_b[["Data Fmt", "BANCO", "DESCRIÇÃO", "Valor Fmt"]], use_container_width=True)
+            sobra_b["Data"] = sobra_b["DATA"].apply(formatar_data)
+            sobra_b["Valor"] = sobra_b["VALOR"].apply(formatar_br)
+            c1.error(f"Sobras Extrato ({len(sobra_b)})")
+            c1.dataframe(sobra_b[["Data", "BANCO", "DESCRIÇÃO", "Valor"]], use_container_width=True)
             
             sobra_d = df_docs[~df_docs['ID_UNICO'].isin(used_docs)].copy()
-            sobra_d["Data Fmt"] = sobra_d["DATA_REF"].apply(formatar_data)
-            sobra_d["Valor Fmt"] = sobra_d["VALOR_REF"].apply(formatar_br)
-            c2.error(f"Pendências nos Documentos ({len(sobra_d)})")
-            c2.dataframe(sobra_d[["Data Fmt", "DESC_REF", "Valor Fmt"]], use_container_width=True)
+            sobra_d["Data"] = sobra_d["DATA_REF"].apply(formatar_data)
+            sobra_d["Valor"] = sobra_d["VALOR_REF"].apply(formatar_br)
+            c2.error(f"Sobras Documentos ({len(sobra_d)})")
+            c2.dataframe(sobra_d[["Data", "DESC_REF", "Valor"]], use_container_width=True)
     else:
-        st.info("Carregue Extrato e Documentos na barra lateral.")
+        st.info("Carregue arquivos na lateral.")
