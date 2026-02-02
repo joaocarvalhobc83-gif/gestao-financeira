@@ -29,11 +29,16 @@ st.markdown("""
         box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
     }
     
-    .stTextInput > div > div > input, .stSelectbox > div > div > div {
+    .stTextInput > div > div > input, .stSelectbox > div > div > div, .stRadio > div {
         background-color: #1e293b;
         color: white;
         border-radius: 10px;
         border: 1px solid #334155;
+    }
+    
+    /* Ajuste cor do Radio Button */
+    .stRadio label {
+        color: white !important;
     }
 
     div.stDownloadButton > button {
@@ -59,7 +64,6 @@ st.markdown("""
 ARQUIVO_DB = "historico_conciliacoes_db.csv"
 
 def carregar_historico_db():
-    """Lê o arquivo de memória local se existir"""
     if os.path.exists(ARQUIVO_DB):
         try:
             return pd.read_csv(ARQUIVO_DB, dtype=str)
@@ -68,23 +72,14 @@ def carregar_historico_db():
     return pd.DataFrame(columns=["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"])
 
 def salvar_no_historico(df_atual):
-    """Salva apenas os itens conciliados no arquivo CSV local"""
-    # Filtra apenas o que está conciliado para economizar espaço
     conciliados = df_atual[df_atual["CONCILIADO"] == True][["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]]
-    
-    # Carrega o histórico existente para não perder dados antigos de outros meses
     historico_antigo = carregar_historico_db()
-    
-    # Junta o antigo com o novo (atualizando se houver duplicado)
     ids_novos = set(conciliados["ID_HASH"])
     historico_mantido = historico_antigo[~historico_antigo["ID_HASH"].isin(ids_novos)]
-    
-    # Concatena
     novo_db = pd.concat([historico_mantido, conciliados], ignore_index=True)
     novo_db.to_csv(ARQUIVO_DB, index=False)
 
 def gerar_hash_unico(row):
-    """Cria uma identidade única para a linha baseada nos dados"""
     texto = f"{row['DATA']}{row['VALOR']}{row['DESCRIÇÃO']}{row['BANCO']}{row['OCORRENCIA']}"
     return hashlib.md5(texto.encode('utf-8')).hexdigest()
 
@@ -131,7 +126,7 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 4. PROCESSAMENTO E CARGA ---
+# --- 4. PROCESSAMENTO ---
 def processar_extrato_inicial(file):
     try:
         xls = pd.ExcelFile(file, engine='openpyxl')
@@ -157,7 +152,7 @@ def processar_extrato_inicial(file):
         col_banco = next((c for c in df.columns if 'BANCO' in c), None)
         df["BANCO"] = df[col_banco].astype(str).str.upper() if col_banco else "PADRÃO"
         
-        # --- GERAÇÃO DE CHAVE ÚNICA ROBUSTA ---
+        # Gera Hash Único
         df = df.sort_values(by=["DATA", "VALOR", "DESCRIÇÃO"])
         df['OCORRENCIA'] = df.groupby(['DATA', 'VALOR', 'DESCRIÇÃO', 'BANCO']).cumcount()
         df['ID_HASH'] = df.apply(gerar_hash_unico, axis=1)
@@ -167,9 +162,8 @@ def processar_extrato_inicial(file):
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
         
-        # --- CRUZAMENTO COM A MEMÓRIA (HISTÓRICO) ---
+        # Recupera Histórico
         historico = carregar_historico_db()
-        
         if not historico.empty:
             df = df.merge(historico, on="ID_HASH", how="left")
             df["CONCILIADO"] = df["CONCILIADO"].fillna("False").astype(str)
@@ -207,19 +201,16 @@ def processar_documentos(file):
         return df
     except: return None
 
-# --- 5. INICIALIZAÇÃO E STATE (COM CORREÇÃO DE ERRO) ---
+# --- 5. INICIALIZAÇÃO ---
 if "filtro_mes" not in st.session_state: st.session_state.filtro_mes = "Todos"
 if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todos"
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
-
 if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
 
-# >>>> FIX AUTOMÁTICO DE INTEGRIDADE <<<<
-# Se o cache estiver com versão antiga (sem ID_HASH), força recarga
+# Proteção de Integridade
 if st.session_state.dados_mestre is not None:
-    required_cols = ["ID_HASH", "CONCILIADO", "DATA_CONCILIACAO"]
-    if not all(col in st.session_state.dados_mestre.columns for col in required_cols):
+    if "ID_HASH" not in st.session_state.dados_mestre.columns:
         st.session_state.dados_mestre = None
         st.rerun()
 
@@ -241,22 +232,36 @@ file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"]
 if file_extrato:
     if st.session_state.dados_mestre is None:
         st.session_state.dados_mestre = processar_extrato_inicial(file_extrato)
-        st.toast("Extrato e Histórico Carregados!", icon="✅")
+        st.toast("Dados carregados com sucesso!", icon="✅")
 
 df_docs = None
 if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA
+# TELA 1: BUSCA AVANÇADA (COM NOVAS MÉTRICAS E EXPORTAÇÃO)
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     st.title("📊 Painel de Controle")
-    st.markdown("Os dados conciliados são salvos automaticamente.")
+    st.markdown("Filtre, edite e exporte seus dados.")
     
     if st.session_state.dados_mestre is not None:
         df_master = st.session_state.dados_mestre
         
+        # --- NOVO: MÉTRICAS DE PRODUTIVIDADE (CONCILIADOS HOJE) ---
+        hoje = datetime.now().strftime("%d/%m/%Y")
+        conc_hoje = df_master[df_master["DATA_CONCILIACAO"].astype(str).str.contains(hoje, na=False)]
+        val_conc_hoje = conc_hoje["VALOR"].sum()
+        qtd_conc_hoje = len(conc_hoje)
+        
+        st.markdown("### 📈 Produção do Dia")
+        m1, m2, m3 = st.columns([1, 1, 2])
+        m1.metric("Qtd. Conciliados Hoje", f"{qtd_conc_hoje}")
+        m2.metric("Valor Conciliado Hoje", formatar_br(val_conc_hoje))
+        m3.caption("Essas métricas mostram o que foi marcado como 'Conciliado' na data de hoje.")
+        st.markdown("---")
+        
+        # --- FILTROS ---
         with st.container():
             with st.expander("🌪️ Filtros Avançados", expanded=True):
                 c1, c2, c3 = st.columns(3)
@@ -298,14 +303,15 @@ if pagina == "🔎 Busca Avançada":
         if not df_f.empty:
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
+            
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Itens Filtrados", f"{len(df_f)}")
-            k2.metric("Entradas", formatar_br(ent), delta="Crédito")
-            k3.metric("Saídas", formatar_br(sai), delta="-Débito", delta_color="inverse")
-            k4.metric("Saldo Seleção", formatar_br(ent + sai))
+            k1.metric("Itens na Tela", f"{len(df_f)}")
+            k2.metric("Entradas (Tela)", formatar_br(ent), delta="Crédito")
+            k3.metric("Saídas (Tela)", formatar_br(sai), delta="-Débito", delta_color="inverse")
+            k4.metric("Saldo (Tela)", formatar_br(ent + sai))
             
             st.markdown("---")
-            st.subheader("📋 Detalhamento (Edite para Salvar Automaticamente)")
+            st.subheader("📋 Detalhamento")
             
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_HASH"]
             df_show = df_f[cols_order].copy()
@@ -339,7 +345,6 @@ if pagina == "🔎 Busca Avançada":
                 if idx_master:
                     idx = idx_master[0]
                     conciliado_antigo = st.session_state.dados_mestre.at[idx, 'CONCILIADO']
-                    
                     if conciliado_novo != conciliado_antigo:
                         st.session_state.dados_mestre.at[idx, 'CONCILIADO'] = conciliado_novo
                         if conciliado_novo:
@@ -352,17 +357,44 @@ if pagina == "🔎 Busca Avançada":
             if mudou_algo:
                 salvar_no_historico(st.session_state.dados_mestre)
                 st.toast("Salvo no Histórico!", icon="💾")
-
             if needs_rerun: st.rerun()
 
-            st.write("")
-            col_exp, _ = st.columns([1, 2])
-            with col_exp:
-                ids_na_tela = df_f['ID_HASH'].tolist()
-                df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_HASH'].isin(ids_na_tela)].copy()
+            # --- NOVO: OPÇÕES DE EXPORTAÇÃO ---
+            st.write("---")
+            st.subheader("📤 Exportar Dados")
+            
+            col_sel, col_btn = st.columns([2, 1])
+            
+            with col_sel:
+                tipo_export = st.radio(
+                    "O que você deseja baixar?",
+                    ["Dados da Tela (Filtrados)", "Apenas Conciliados (Geral)", "Tudo (Base Completa)"],
+                    horizontal=True
+                )
+
+            with col_btn:
+                st.write("") # Espaço para alinhar
+                st.write("") 
+                
+                # Lógica de Seleção
+                if tipo_export == "Dados da Tela (Filtrados)":
+                    ids_na_tela = df_f['ID_HASH'].tolist()
+                    df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_HASH'].isin(ids_na_tela)].copy()
+                elif tipo_export == "Apenas Conciliados (Geral)":
+                    df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['CONCILIADO'] == True].copy()
+                else: # Tudo
+                    df_export = st.session_state.dados_mestre.copy()
+                
+                # Formata Sim/Não
                 df_export["CONCILIADO"] = df_export["CONCILIADO"].apply(lambda x: "Sim" if x else "Não")
+                
                 dados_excel = to_excel(df_export)
-                st.download_button(label="📥 BAIXAR DADOS", data=dados_excel, file_name="resultado_conciliado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button(
+                    label=f"📥 BAIXAR: {tipo_export.upper()}",
+                    data=dados_excel,
+                    file_name="dados_exportados.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
         else:
             st.warning("🔍 Nenhum dado encontrado.")
     else:
@@ -373,7 +405,7 @@ if pagina == "🔎 Busca Avançada":
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
-    st.markdown("Cruzamento entre **Extrato** e **Documentos** (Valor + Descrição).")
+    st.markdown("Cruzamento entre **Extrato** e **Documentos**.")
     
     if st.session_state.dados_mestre is not None and df_docs is not None:
         with st.expander("⚙️ Configuração do Robô", expanded=True):
@@ -393,7 +425,6 @@ elif pagina == "🤝 Conciliação Automática":
             for i, doc in enumerate(l_docs):
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
-                
                 candidatos = []
                 val_doc = doc['VALOR_REF']
                 for b in l_banco:
@@ -401,7 +432,6 @@ elif pagina == "🤝 Conciliação Automática":
                     val_banco = abs(b['VALOR'])
                     if abs(val_doc - val_banco) <= 0.10:
                         candidatos.append(b)
-                
                 if not candidatos: continue
                 melhor_match = None
                 maior_score = 0
@@ -410,7 +440,6 @@ elif pagina == "🤝 Conciliação Automática":
                     if score > maior_score:
                         maior_score = score
                         melhor_match = cand
-                
                 if maior_score >= similaridade:
                     matches.append({
                         "Data Extrato": formatar_data(melhor_match['DATA']),
