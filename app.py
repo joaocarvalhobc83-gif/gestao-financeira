@@ -1,14 +1,3 @@
-Entendido. Agora vamos consolidar tudo para a versão definitiva.
-
-**Resumo das alterações:**
-
-1. **Exportações:** Mudei **TODOS** os botões de download (em todas as abas) para gerar arquivos **Excel (.xlsx)**. Adeus CSV.
-2. **Aba Conciliação:** Restaurada completa com filtros (Mês/Banco), execução do robô, tabela de *matches* e botão de confirmação.
-3. **Aba Gestão Benner:** A lógica de conflitos (duplicidade) e auto-conciliação pela data de baixa foi mantida **intocada**, alterando apenas o botão de download para Excel.
-
-Aqui está o código completo:
-
-```python
 import streamlit as st
 import pandas as pd
 import re
@@ -508,5 +497,3 @@ elif pagina == "🤝 Conciliação Automática":
                 st.warning("Nenhum match encontrado.")
     else:
         st.warning("Carregue Extrato e Documentos primeiro.")
-
-```
