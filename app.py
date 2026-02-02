@@ -78,7 +78,7 @@ def formatar_visual_db(valor):
 
 def limpar_descricao(texto):
     texto = str(texto).upper()
-    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB", "ELET"]
+    termos_inuteis = ["PIX", "TED", "DOC", "TRANSF", "PGTO", "PAGAMENTO", "ENVIO", "CREDITO", "DEBITO", "EM CONTA", "STR", "SPB", "ELET", "COMPRA", "CARTAO"]
     for termo in termos_inuteis:
         texto = texto.replace(termo, "")
     texto = re.sub(r'[^A-Z0-9\s]', ' ', texto)
@@ -92,9 +92,11 @@ def converter_valor_correto(valor, linha_inteira=None):
     if ',' in valor_limpo: valor_limpo = valor_limpo.replace('.', '').replace(',', '.')
     try:
         val_float = float(valor_limpo) * sinal
+        # Verificação extra de coluna D/C
         if linha_inteira is not None:
             texto_linha = str(linha_inteira.values).upper()
-            if "DÉBITO" in texto_linha or ";D;" in texto_linha:
+            # Verifica se tem 'D' isolado ou palavra DEBITO
+            if "DÉBITO" in texto_linha or " 'D'" in texto_linha or ";D;" in texto_linha:
                 if val_float > 0: val_float = val_float * -1
         return val_float
     except: return 0.0
@@ -106,35 +108,71 @@ def to_excel(df_to_download):
         df_to_download.to_excel(writer, index=False)
     return output.getvalue()
 
-# --- 2. PROCESSAMENTO ---
+# --- 2. PROCESSAMENTO EXTRATO (AGORA ACEITA CSV) ---
 @st.cache_data
 def processar_extrato(file):
     try:
-        xls = pd.ExcelFile(file, engine='openpyxl')
-        if "Extrato" not in xls.sheet_names:
-            st.error("❌ Aba 'Extrato' não encontrada.")
-            return None
-        df = pd.read_excel(xls, sheet_name="Extrato", header=0)
+        # Detecta extensão
+        nome_arquivo = file.name.lower()
+        
+        if nome_arquivo.endswith('.csv') or nome_arquivo.endswith('.txt'):
+            # Tenta ler CSV com separadores comuns
+            try: df = pd.read_csv(file, sep=';', encoding='latin1', on_bad_lines='skip') # Tenta ponto e vírgula (BB)
+            except: 
+                file.seek(0)
+                df = pd.read_csv(file, sep=',', encoding='utf-8', on_bad_lines='skip')
+                
+        else:
+            # Ler Excel padrão
+            xls = pd.ExcelFile(file, engine='openpyxl')
+            if "Extrato" in xls.sheet_names:
+                df = pd.read_excel(xls, sheet_name="Extrato", header=0)
+            else:
+                df = pd.read_excel(xls, header=0) # Tenta a primeira aba se não achar "Extrato"
+
+        # Padroniza colunas
         df.columns = [str(c).upper().strip() for c in df.columns]
-        mapa = {'DATA LANÇAMENTO': 'DATA', 'LANCAMENTO': 'DATA', 'HISTÓRICO': 'DESCRIÇÃO', 'HISTORICO': 'DESCRIÇÃO', 'VALOR (R$)': 'VALOR', 'INSTITUICAO': 'BANCO', 'INSTITUIÇÃO': 'BANCO'}
+        
+        # Mapeamento Genérico
+        mapa = {
+            'DATA LANÇAMENTO': 'DATA', 'LANCAMENTO': 'DATA', 'DT. LCTO': 'DATA',
+            'HISTÓRICO': 'DESCRIÇÃO', 'HISTORICO': 'DESCRIÇÃO', 'MEMO': 'DESCRIÇÃO',
+            'VALOR (R$)': 'VALOR', 'VALOR': 'VALOR', 
+            'INSTITUICAO': 'BANCO', 'INSTITUIÇÃO': 'BANCO'
+        }
         df = df.rename(columns=mapa)
+        
+        # Busca colunas chave
         col_data = next((c for c in df.columns if 'DATA' in c), None)
         col_valor = next((c for c in df.columns if 'VALOR' in c), None)
-        if not col_data or not col_valor: return None
+        
+        if not col_data or not col_valor: 
+            st.error("Colunas DATA ou VALOR não encontradas no Extrato.")
+            return None
+            
+        # Tratamento de Data
         df["DATA"] = pd.to_datetime(df[col_data], dayfirst=True, errors='coerce')
+        
+        # Tratamento de Valor e Sinal
         df["VALOR"] = df.apply(lambda row: converter_valor_correto(row[col_valor], row), axis=1)
+        
+        # Tratamento de Descrição
         col_desc = next((c for c in df.columns if 'DESC' in c or 'HIST' in c), None)
-        df["DESCRIÇÃO"] = df[col_desc].astype(str).fillna("") if col_desc else ""
+        df["DESCRIÇÃO"] = df[col_desc].astype(str).fillna("") if col_desc else "Sem Descrição"
+        
+        # Outros campos
         col_banco = next((c for c in df.columns if 'BANCO' in c), None)
         df["BANCO"] = df[col_banco].astype(str).str.upper() if col_banco else "PADRÃO"
+        
         df["MES_ANO"] = df["DATA"].dt.strftime('%m/%Y')
         df["VALOR_VISUAL"] = df["VALOR"].apply(formatar_visual_db)
         df["DESC_CLEAN"] = df["DESCRIÇÃO"].apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
         df["TIPO"] = df["VALOR"].apply(lambda x: "CRÉDITO" if x >= 0 else "DÉBITO")
+        
         return df
     except Exception as e:
-        st.error(f"Erro no Extrato: {e}")
+        st.error(f"Erro ao ler extrato: {e}")
         return None
 
 @st.cache_data
@@ -144,7 +182,6 @@ def processar_documentos(file):
         except: df = pd.read_excel(file)
         df.columns = [str(c).strip() for c in df.columns]
         
-        # Leitura Híbrida (Baixa ou Total) para garantir que pegamos o valor correto
         col_baixa = next((c for c in df.columns if "Valor Baixa" in c), None)
         col_total = next((c for c in df.columns if "Valor Total" in c), None)
 
@@ -198,13 +235,19 @@ st.sidebar.title("Navegação")
 pagina = st.sidebar.radio("Módulo:", ["🔎 Busca Avançada", "🤝 Conciliação Automática"])
 st.sidebar.markdown("---")
 st.sidebar.title("📁 Importação")
-file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xlsm"])
+
+# --- ALTERAÇÃO AQUI: Aceita CSV no Extrato ---
+file_extrato = st.sidebar.file_uploader("1. Extrato (Excel ou CSV)", type=["xlsx", "xlsm", "csv", "txt"])
 file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
 df_extrato = None
 df_docs = None
 if file_extrato: df_extrato = processar_extrato(file_extrato)
 if file_docs: df_docs = processar_documentos(file_docs)
+
+# --- FILTROS PERSISTENTES ---
+if df_extrato is not None:
+    pass
 
 # ==============================================================================
 # TELA 1: BUSCA AVANÇADA
@@ -274,7 +317,7 @@ if pagina == "🔎 Busca Avançada":
         else:
             st.warning("🔍 Nenhum dado encontrado.")
     else:
-        st.info("👈 Carregue 'EXTRATOS GERAIS.xlsm' na barra lateral.")
+        st.info("👈 Carregue os arquivos na barra lateral.")
 
 # ==============================================================================
 # TELA 2: CONCILIAÇÃO
@@ -301,14 +344,13 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
-                # --- ALTERAÇÃO AQUI: Regra de tolerância igual à pesquisa (0.10) ---
+                # --- REGRA DE VALOR (0.10) ---
                 val_doc = abs(doc['VALOR_REF'])
                 
                 candidatos = []
                 for b in l_banco:
                     if b['ID_UNICO'] not in used_banco:
                         val_ext = abs(b['VALOR'])
-                        # Usando a mesma margem de 0.10 da pesquisa
                         if abs(val_doc - val_ext) <= 0.10:
                             candidatos.append(b)
 
