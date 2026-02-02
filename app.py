@@ -149,13 +149,33 @@ def processar_documentos(file):
         try: df = pd.read_csv(file, sep=',')
         except: df = pd.read_excel(file)
         df.columns = [str(c).strip() for c in df.columns]
-        if "Data Baixa" not in df.columns or "Valor Baixa" not in df.columns: return None
-        df = df.dropna(subset=["Data Baixa"])
-        df["DATA_REF"] = pd.to_datetime(df["Data Baixa"], errors='coerce')
-        df["VALOR_REF"] = pd.to_numeric(df["Valor Baixa"], errors='coerce').fillna(0)
+        
+        # --- LÓGICA DE COLUNA DE VALOR (PRIORIZA VALOR TOTAL) ---
+        col_valor = None
+        if "Valor Total" in df.columns:
+            col_valor = "Valor Total"
+        elif "Valor Baixa" in df.columns:
+            col_valor = "Valor Baixa"
+            
+        if col_valor is None: return None
+        
+        # 2. Processamento de Data (Tenta Baixa > Vencimento > Emissão) apenas para visualização
+        df["DATA_REF"] = pd.NaT
+        if "Data Baixa" in df.columns:
+            df["DATA_REF"] = pd.to_datetime(df["Data Baixa"], errors='coerce')
+        if "Data de Vencimento" in df.columns:
+            df["DATA_REF"] = df["DATA_REF"].fillna(pd.to_datetime(df["Data de Vencimento"], errors='coerce'))
+        if "Data de Emissão" in df.columns:
+            df["DATA_REF"] = df["DATA_REF"].fillna(pd.to_datetime(df["Data de Emissão"], errors='coerce'))
+
+        # 3. Processamento de Valor
+        df["VALOR_REF"] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+        
+        # 4. Outros campos
         df["DESC_REF"] = df.get("Nome", "") + " " + df.get("Número", "").astype(str)
         df["DESC_CLEAN"] = df.get("Nome", "").astype(str).apply(limpar_descricao)
         df["ID_UNICO"] = range(len(df))
+        
         return df
     except: return None
 
@@ -203,31 +223,23 @@ if pagina == "🔎 Busca Avançada":
     if st.session_state.dados_mestre is not None:
         df_master = st.session_state.dados_mestre
         
-        # --- FILTROS ---
         with st.container():
             with st.expander("🌪️ Filtros Avançados", expanded=True):
                 c1, c2, c3 = st.columns(3)
-                
                 meses = ["Todos"] + sorted(df_master["MES_ANO"].unique().tolist(), reverse=True)
                 sel_mes = c1.selectbox("📅 Mês de Referência:", meses, key="filtro_mes")
-                
                 bancos = ["Todos"] + sorted(df_master["BANCO"].unique().tolist())
                 sel_banco = c2.selectbox("🏦 Banco:", bancos, key="filtro_banco")
-
                 tipos = ["Todos", "CRÉDITO", "DÉBITO"]
                 sel_tipo = c3.selectbox("🔄 Tipo de Movimento:", tipos, key="filtro_tipo")
-                
                 if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao): pass
         
-        # Aplica Filtros
         df_f = df_master.copy()
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
         if st.session_state.filtro_banco != "Todos": df_f = df_f[df_f["BANCO"] == st.session_state.filtro_banco]
         if st.session_state.filtro_tipo != "Todos": df_f = df_f[df_f["TIPO"] == st.session_state.filtro_tipo]
 
         st.markdown("###")
-        
-        # --- BUSCA TEXTO ---
         busca = st.text_input("🔎 Pesquisa Rápida (Valor ou Nome)", key="filtro_texto", placeholder="Ex: 483,71 ou Nome...")
 
         if busca:
@@ -249,7 +261,6 @@ if pagina == "🔎 Busca Avançada":
             else:
                 df_f = df_f[df_f["DESCRIÇÃO"].str.contains(termo, case=False, na=False)]
 
-        # --- RESULTADOS E EDIÇÃO ---
         if not df_f.empty:
             ent = df_f[df_f["VALOR"] > 0]["VALOR"].sum()
             sai = df_f[df_f["VALOR"] < 0]["VALOR"].sum()
@@ -261,7 +272,7 @@ if pagina == "🔎 Busca Avançada":
             k4.metric("Saldo Seleção", formatar_br(ent + sai))
             
             st.markdown("---")
-            st.subheader("📋 Detalhamento (Marque na coluna 'Conciliado')")
+            st.subheader("📋 Detalhamento (Edite a coluna 'Conciliado')")
             
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_UNICO"]
             df_show = df_f[cols_order].copy()
@@ -274,16 +285,8 @@ if pagina == "🔎 Busca Avançada":
                 height=500,
                 key="editor_principal",
                 column_config={
-                    "CONCILIADO": st.column_config.CheckboxColumn(
-                        "Conciliado?",
-                        help="Marque para conciliar",
-                        default=False
-                    ),
-                    "DATA_CONCILIACAO": st.column_config.TextColumn(
-                        "Data Visto",
-                        help="Preenchido Automaticamente",
-                        disabled=True
-                    ),
+                    "CONCILIADO": st.column_config.CheckboxColumn("Conciliado?", help="Marque para conciliar", default=False),
+                    "DATA_CONCILIACAO": st.column_config.TextColumn("Data Visto", help="Preenchido Automaticamente", disabled=True),
                     "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY", disabled=True),
                     "BANCO": st.column_config.TextColumn("Instituição", disabled=True),
                     "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large", disabled=True),
@@ -293,12 +296,10 @@ if pagina == "🔎 Busca Avançada":
                 }
             )
             
-            # --- SINCRONIZAÇÃO ---
             needs_rerun = False
             for index, row in edited_df.iterrows():
                 id_unico = row['ID_UNICO']
                 conciliado_novo = row['CONCILIADO']
-                
                 idx_master = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_UNICO'] == id_unico].tolist()
                 
                 if idx_master:
@@ -307,52 +308,40 @@ if pagina == "🔎 Busca Avançada":
                     
                     if conciliado_novo != conciliado_antigo:
                         st.session_state.dados_mestre.at[idx, 'CONCILIADO'] = conciliado_novo
-                        
                         if conciliado_novo:
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
                         else:
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = None
-                        
                         needs_rerun = True
 
-            if needs_rerun:
-                st.rerun()
+            if needs_rerun: st.rerun()
 
-            # --- BOTÃO DE EXPORTAR ---
             st.write("")
             col_exp, _ = st.columns([1, 2])
             with col_exp:
                 ids_na_tela = df_f['ID_UNICO'].tolist()
                 df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_UNICO'].isin(ids_na_tela)].copy()
-                
-                # --- Correção: Transforma True/False em Sim/Não para o Excel ---
                 df_export["CONCILIADO"] = df_export["CONCILIADO"].apply(lambda x: "Sim" if x else "Não")
-                
                 dados_excel = to_excel(df_export)
-                st.download_button(
-                    label="📥 BAIXAR DADOS (COM CONCILIAÇÃO)",
-                    data=dados_excel,
-                    file_name="resultado_conciliado.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button(label="📥 BAIXAR DADOS (COM CONCILIAÇÃO)", data=dados_excel, file_name="resultado_conciliado.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.warning("🔍 Nenhum dado encontrado com os filtros atuais.")
     else:
         st.info("👈 Para começar, carregue o arquivo 'EXTRATOS GERAIS.xlsm' na barra lateral.")
 
 # ==============================================================================
-# TELA 2: CONCILIAÇÃO AUTOMÁTICA (REGRA DE VALOR IGUAL À BUSCA)
+# TELA 2: CONCILIAÇÃO AUTOMÁTICA
 # ==============================================================================
 elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
-    st.markdown("Cruzamento entre **Extrato** e **Documentos** ignorando datas.")
+    st.markdown("Cruzamento entre **Extrato** e **Documentos** (Valor + Descrição).")
     
     if st.session_state.dados_mestre is not None and df_docs is not None:
         
         with st.expander("⚙️ Configuração do Robô", expanded=True):
             c1, c2 = st.columns(2)
             similaridade = c1.slider("Rigor do Nome (%)", 50, 100, 70)
-            c2.info("Regras Ativas:\n1. Valor: Margem de -10 a +10 centavos (Regra Busca Avançada).\n2. Data: Ignorada.")
+            c2.info("Regras Ativas:\n1. VALOR: Margem de +/- 10 centavos (Usa coluna 'Valor Total').\n2. DESCRIÇÃO: Deve conter texto similar.\n3. DATA: Ignorada.")
         
         if st.button("🚀 EXECUTAR CONCILIAÇÃO"):
             matches = []
@@ -369,29 +358,33 @@ elif pagina == "🤝 Conciliação Automática":
                 if i % 10 == 0: bar.progress(int((i/total)*100))
                 if doc['ID_UNICO'] in used_docs: continue
                 
+                # --- PASSO 1: FILTRO POR VALOR (Igual à Busca Avançada) ---
                 candidatos = []
+                val_doc = doc['VALOR_REF']
+                
                 for b in l_banco:
                     if b['ID_UNICO'] in used_banco: continue
                     
-                    # --- APLICAÇÃO DA MESMA REGRA DA BUSCA AVANÇADA ---
-                    # Regra: abs(Valor Doc - Valor Abs Banco) <= 0.10
-                    # Isso garante que se a diferença estiver entre -0.10 e 0.10 ela passa
-                    val_doc = doc['VALOR_REF']
                     val_banco = abs(b['VALOR'])
                     
+                    # Aceita diferença de -0.10 a +0.10
                     if abs(val_doc - val_banco) <= 0.10:
                         candidatos.append(b)
                 
                 if not candidatos: continue
                 
+                # --- PASSO 2: FILTRO POR DESCRIÇÃO (Palavras) ---
                 melhor_match = None
                 maior_score = 0
+                
+                # Compara o texto do documento com os candidatos de valor
                 for cand in candidatos:
                     score = fuzz.token_set_ratio(doc['DESC_CLEAN'], cand['DESC_CLEAN'])
                     if score > maior_score:
                         maior_score = score
                         melhor_match = cand
                 
+                # Só aceita se a descrição também bater (Score > Configuração)
                 if maior_score >= similaridade:
                     matches.append({
                         "Data Extrato": formatar_data(melhor_match['DATA']),
@@ -399,7 +392,8 @@ elif pagina == "🤝 Conciliação Automática":
                         "Descrição Extrato": melhor_match['DESCRIÇÃO'],
                         "Valor Extrato": formatar_br(melhor_match['VALOR']),
                         "Descrição Doc": doc['DESC_REF'],
-                        "Valor Doc": formatar_br(doc['VALOR_REF']),
+                        "Data Doc (Ref)": formatar_data(doc['DATA_REF']),
+                        "Valor Doc (Total)": formatar_br(doc['VALOR_REF']),
                         "Diferença": f"{round(doc['VALOR_REF'] - abs(melhor_match['VALOR']), 2):.2f}",
                         "Match Score": f"{maior_score}%"
                     })
@@ -412,7 +406,7 @@ elif pagina == "🤝 Conciliação Automática":
             df_results = pd.DataFrame(matches)
             
             if not df_results.empty:
-                st.success(f"✅ {len(df_results)} Pares Encontrados!")
+                st.success(f"✅ {len(df_results)} Pares Encontrados (Valor + Descrição)!")
                 st.dataframe(df_results, use_container_width=True)
                 
                 st.write("")
@@ -426,7 +420,7 @@ elif pagina == "🤝 Conciliação Automática":
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
             else:
-                st.warning("Nenhuma conciliação encontrada.")
+                st.warning("Nenhuma conciliação encontrada com Valor E Descrição compatíveis.")
             
             st.markdown("---")
             c_sobra1, c_sobra2 = st.columns(2)
