@@ -6,7 +6,6 @@ import hashlib
 from datetime import datetime
 from io import BytesIO
 from rapidfuzz import process, fuzz
-# Removi o import do plotly para evitar o erro
 
 # --- 1. CONFIGURAÇÃO E ESTILO PREMIUM ---
 st.set_page_config(page_title="Financeiro PRO", layout="wide", page_icon="💎")
@@ -96,25 +95,50 @@ def carregar_db_benner():
     return pd.DataFrame(columns=colunas_padrao)
 
 def atualizar_db_benner(novo_df):
+    """
+    Atualiza o banco de dados. 
+    REGRA DE OURO: Se 'Data Baixa' existe no arquivo novo, marca como Conciliado automaticamente.
+    """
     db_atual = carregar_db_benner()
     
     novo_df['ID_BENNER'] = novo_df['Número'].astype(str)
+    
+    # --- REGRA DE DATA BAIXA (AUTO-CONCILIAÇÃO) ---
+    # Converte para data para verificar se não é NaT (Not a Time)
+    novo_df['Data Baixa Temp'] = pd.to_datetime(novo_df['Data Baixa'], errors='coerce')
+    
+    # Define padrão como Pendente
     novo_df['STATUS_CONCILIACAO'] = "Pendente"
     novo_df['DATA_CONCILIACAO_SISTEMA'] = None
     
+    # Se tem data de baixa válida, marca como Conciliado
+    mask_baixado = novo_df['Data Baixa Temp'].notna()
+    novo_df.loc[mask_baixado, 'STATUS_CONCILIACAO'] = 'Conciliado'
+    novo_df.loc[mask_baixado, 'DATA_CONCILIACAO_SISTEMA'] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    
+    # Remove coluna temporária
+    novo_df = novo_df.drop(columns=['Data Baixa Temp'])
+    
+    # --- MERGE INTELIGENTE ---
+    # Precisamos manter o histórico de quem foi conciliado MANUALMENTE pelo robô antes
     ids_novos = set(novo_df['ID_BENNER'])
     
     if not db_atual.empty:
         status_map = db_atual.set_index('ID_BENNER')[['STATUS_CONCILIACAO', 'DATA_CONCILIACAO_SISTEMA']].to_dict('index')
+        
         for idx, row in novo_df.iterrows():
             id_b = row['ID_BENNER']
-            if id_b in status_map:
+            
+            # Se o arquivo diz que está Pendente (sem data de baixa), mas no banco já estava Conciliado (pelo robô)
+            # Mantemos o status Conciliado do banco para não perder trabalho.
+            if row['STATUS_CONCILIACAO'] == 'Pendente' and id_b in status_map:
                 if status_map[id_b]['STATUS_CONCILIACAO'] == 'Conciliado':
                     novo_df.at[idx, 'STATUS_CONCILIACAO'] = 'Conciliado'
                     novo_df.at[idx, 'DATA_CONCILIACAO_SISTEMA'] = status_map[id_b]['DATA_CONCILIACAO_SISTEMA']
 
     db_mantido = db_atual[~db_atual['ID_BENNER'].isin(ids_novos)]
     db_final = pd.concat([db_mantido, novo_df], ignore_index=True)
+    
     db_final.to_csv(DB_BENNER, index=False)
     return db_final
 
@@ -303,7 +327,10 @@ if file_docs:
     if "ultimo_arq_benner" not in st.session_state or st.session_state.ultimo_arq_benner != file_docs.name:
         st.session_state.db_benner = processar_upload_benner(file_docs)
         st.session_state.ultimo_arq_benner = file_docs.name
-        st.toast("Base Benner Atualizada com Sucesso!", icon="💾")
+        
+        # Conta quantos foram auto-conciliados
+        conc_count = len(st.session_state.db_benner[st.session_state.db_benner['STATUS_CONCILIACAO'] == 'Conciliado'])
+        st.toast(f"Base Benner Atualizada! {conc_count} itens já marcados como conciliados (via Baixa).", icon="💾")
 
 # ==============================================================================
 # TELA 1: BUSCA AVANÇADA (EXTRATO)
@@ -458,6 +485,7 @@ elif pagina == "📁 Gestão Benner (Documentos)":
     if not df_benner.empty:
         df_benner['Valor Total'] = pd.to_numeric(df_benner['Valor Total'], errors='coerce').fillna(0)
         df_benner['Data de Vencimento'] = pd.to_datetime(df_benner['Data de Vencimento'], errors='coerce')
+        df_benner['Data Baixa'] = pd.to_datetime(df_benner['Data Baixa'], errors='coerce')
         
         c1, c2, c3 = st.columns(3)
         status_filter = c1.selectbox("Status Conciliação", ["Todos", "Pendente", "Conciliado"])
@@ -507,7 +535,7 @@ elif pagina == "🤝 Conciliação Automática":
     
     df_benner = st.session_state.db_benner
     
-    # Prepara dados do Benner para o Robô
+    # Prepara dados do Benner para o Robô (Apenas Pendentes)
     if not df_benner.empty:
         df_docs_proc = df_benner[df_benner['STATUS_CONCILIACAO'] == 'Pendente'].copy()
         
