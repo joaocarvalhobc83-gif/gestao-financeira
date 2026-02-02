@@ -104,7 +104,6 @@ def to_excel(df_to_download):
     return output.getvalue()
 
 # --- 2. PROCESSAMENTO ---
-# Removemos o cache aqui para permitir edição dinâmica no session_state
 def processar_extrato_inicial(file):
     try:
         xls = pd.ExcelFile(file, engine='openpyxl')
@@ -166,7 +165,6 @@ if "filtro_banco" not in st.session_state: st.session_state.filtro_banco = "Todo
 if "filtro_tipo" not in st.session_state: st.session_state.filtro_tipo = "Todos"
 if "filtro_texto" not in st.session_state: st.session_state.filtro_texto = ""
 
-# STATE PARA DADOS MESTRE (Persistência dos Checks)
 if "dados_mestre" not in st.session_state: st.session_state.dados_mestre = None
 
 def limpar_filtros_acao():
@@ -185,9 +183,7 @@ st.sidebar.title("📁 Importação")
 file_extrato = st.sidebar.file_uploader("1. Extrato (Excel)", type=["xlsx", "xlsm"])
 file_docs = st.sidebar.file_uploader("2. Documentos (CSV)", type=["csv", "xlsx"])
 
-# Lógica de Carregamento Único
 if file_extrato:
-    # Se ainda não carregou ou se mudou o arquivo
     if st.session_state.dados_mestre is None:
         st.session_state.dados_mestre = processar_extrato_inicial(file_extrato)
         st.toast("Extrato Carregado com Sucesso!", icon="✅")
@@ -197,16 +193,15 @@ if file_docs:
     df_docs = processar_documentos(file_docs)
 
 # ==============================================================================
-# TELA 1: BUSCA AVANÇADA COM CHECKBOX E DATA
+# TELA 1: BUSCA AVANÇADA (COM EXPORTAÇÃO CORRIGIDA SIM/NÃO)
 # ==============================================================================
 if pagina == "🔎 Busca Avançada":
     
     st.title("📊 Painel de Controle")
     st.markdown("Filtre, marque como conciliado e exporte.")
     
-    # Trabalhamos sempre com uma cópia ou referência do Session State
     if st.session_state.dados_mestre is not None:
-        df_master = st.session_state.dados_mestre # Referência direta
+        df_master = st.session_state.dados_mestre
         
         # --- FILTROS ---
         with st.container():
@@ -224,8 +219,8 @@ if pagina == "🔎 Busca Avançada":
                 
                 if st.button("🧹 LIMPAR FILTROS", type="secondary", on_click=limpar_filtros_acao): pass
         
-        # Aplica Filtros (Criando uma visualização filtrada)
-        df_f = df_master.copy() # Cópia para filtragem
+        # Aplica Filtros
+        df_f = df_master.copy()
         if st.session_state.filtro_mes != "Todos": df_f = df_f[df_f["MES_ANO"] == st.session_state.filtro_mes]
         if st.session_state.filtro_banco != "Todos": df_f = df_f[df_f["BANCO"] == st.session_state.filtro_banco]
         if st.session_state.filtro_tipo != "Todos": df_f = df_f[df_f["TIPO"] == st.session_state.filtro_tipo]
@@ -268,13 +263,10 @@ if pagina == "🔎 Busca Avançada":
             st.markdown("---")
             st.subheader("📋 Detalhamento (Edite a coluna 'Conciliado')")
             
-            # Prepara Dataframe para o Editor
-            # Reordenamos colunas para colocar o CHECK no começo
             cols_order = ["CONCILIADO", "DATA_CONCILIACAO", "DATA", "BANCO", "DESCRIÇÃO", "VALOR", "TIPO", "ID_UNICO"]
             df_show = df_f[cols_order].copy()
             df_show["DATA"] = df_show["DATA"].dt.date
             
-            # --- O EDITOR DE DADOS (Aqui acontece a mágica) ---
             edited_df = st.data_editor(
                 df_show,
                 use_container_width=True,
@@ -290,43 +282,35 @@ if pagina == "🔎 Busca Avançada":
                     "DATA_CONCILIACAO": st.column_config.TextColumn(
                         "Data Visto",
                         help="Preenchido Automaticamente",
-                        disabled=True # Usuário não edita a data, o sistema preenche
+                        disabled=True
                     ),
                     "DATA": st.column_config.DateColumn("Data", format="DD/MM/YYYY", disabled=True),
                     "BANCO": st.column_config.TextColumn("Instituição", disabled=True),
                     "DESCRIÇÃO": st.column_config.TextColumn("Descrição", width="large", disabled=True),
                     "VALOR": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", disabled=True),
                     "TIPO": st.column_config.TextColumn("Tipo", disabled=True),
-                    "ID_UNICO": None # Oculta o ID
+                    "ID_UNICO": None 
                 }
             )
             
-            # --- SINCRONIZAÇÃO E ATUALIZAÇÃO DA DATA ---
-            # Comparamos o editado com o original da sessão para atualizar
-            # Como st.data_editor retorna o estado atual, verificamos o que mudou
-            
-            # Iteramos sobre as linhas editadas para atualizar o MESTRE
+            # --- SINCRONIZAÇÃO ---
             needs_rerun = False
             for index, row in edited_df.iterrows():
                 id_unico = row['ID_UNICO']
                 conciliado_novo = row['CONCILIADO']
                 
-                # Busca a linha correspondente no DF Mestre da Sessão
                 idx_master = st.session_state.dados_mestre.index[st.session_state.dados_mestre['ID_UNICO'] == id_unico].tolist()
                 
                 if idx_master:
                     idx = idx_master[0]
                     conciliado_antigo = st.session_state.dados_mestre.at[idx, 'CONCILIADO']
                     
-                    # Se houve mudança no Checkbox
                     if conciliado_novo != conciliado_antigo:
                         st.session_state.dados_mestre.at[idx, 'CONCILIADO'] = conciliado_novo
                         
                         if conciliado_novo:
-                            # Se marcou, coloca a data de agora
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = datetime.now().strftime("%d/%m/%Y %H:%M")
                         else:
-                            # Se desmarcou, limpa a data
                             st.session_state.dados_mestre.at[idx, 'DATA_CONCILIACAO'] = None
                         
                         needs_rerun = True
@@ -334,16 +318,16 @@ if pagina == "🔎 Busca Avançada":
             if needs_rerun:
                 st.rerun()
 
-            # --- BOTÃO DE EXPORTAR (BAIXA O MESTRE COMPLETO ATUALIZADO) ---
+            # --- BOTÃO DE EXPORTAR (CORREÇÃO AQUI) ---
             st.write("")
             col_exp, _ = st.columns([1, 2])
             with col_exp:
-                # Filtramos o mestre atual para baixar apenas o que está na tela ou o mestre todo?
-                # Geralmente o usuário quer baixar o que filtrou ou tudo. Vamos baixar o que está FILTRADO mas com os dados atualizados.
-                
-                # Recarrega df_f atualizado do mestre
                 ids_na_tela = df_f['ID_UNICO'].tolist()
                 df_export = st.session_state.dados_mestre[st.session_state.dados_mestre['ID_UNICO'].isin(ids_na_tela)].copy()
+                
+                # --- [CORREÇÃO] Transforma True/False em Sim/Não para o Excel ---
+                df_export["CONCILIADO"] = df_export["CONCILIADO"].apply(lambda x: "Sim" if x else "Não")
+                # ----------------------------------------------------------------
                 
                 dados_excel = to_excel(df_export)
                 st.download_button(
@@ -364,7 +348,6 @@ elif pagina == "🤝 Conciliação Automática":
     st.title("Conciliação Bancária")
     st.markdown("Cruzamento entre **Extrato** e **Documentos** ignorando datas.")
     
-    # Usa o Mestre aqui também
     if st.session_state.dados_mestre is not None and df_docs is not None:
         
         with st.expander("⚙️ Configuração do Robô", expanded=True):
@@ -377,7 +360,6 @@ elif pagina == "🤝 Conciliação Automática":
             used_banco = set()
             used_docs = set()
             
-            # Pega dados do mestre
             l_banco = st.session_state.dados_mestre.to_dict('records')
             l_docs = df_docs.to_dict('records')
             
@@ -445,7 +427,6 @@ elif pagina == "🤝 Conciliação Automática":
             st.markdown("---")
             c_sobra1, c_sobra2 = st.columns(2)
             
-            # Pendências Extrato (Baseado no Mestre)
             sobra_b = st.session_state.dados_mestre[~st.session_state.dados_mestre['ID_UNICO'].isin(used_banco)].copy()
             sobra_b["Data Fmt"] = sobra_b["DATA"].apply(formatar_data)
             sobra_b["Valor Fmt"] = sobra_b["VALOR"].apply(formatar_br)
