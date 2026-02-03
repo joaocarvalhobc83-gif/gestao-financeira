@@ -643,3 +643,4 @@ elif pagina == "🤝 Conciliação Automática":
                 st.warning("Nenhum match encontrado.")
     else:
         st.warning("Carregue Extrato e Documentos primeiro.")
+
